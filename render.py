@@ -25,7 +25,7 @@ import imageio
 import numpy as np
 
 
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
@@ -40,8 +40,10 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         fid = view.fid
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
+        if not deform_sh:
+            d_sh = None
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)
         rendering = results["render"]
         depth = results["depth"]
         depth = depth / (depth.max() + 1e-5)
@@ -52,7 +54,7 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
 
-def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
     render_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "depth")
 
@@ -69,8 +71,10 @@ def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
         fid = torch.Tensor([t / (frame - 1)]).cuda()
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
+        if not deform_sh:
+            d_sh = None
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -83,7 +87,7 @@ def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, timer):
+def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, timer, deform_sh):
     render_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "depth")
     # acc_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "acc")
@@ -115,8 +119,10 @@ def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling, d_sh = timer.step(xyz.detach(), time_input)
+        if not deform_sh:
+            d_sh = None
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -131,7 +137,7 @@ def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
     render_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "depth")
 
@@ -159,8 +165,10 @@ def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, v
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
+        if not deform_sh:
+            d_sh = None
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -301,12 +309,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform)
+                        background, deform, dataset.deform_sh)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform)
+                        background, deform, dataset.deform_sh)
 
 
 if __name__ == "__main__":

@@ -424,16 +424,25 @@ def readNerfiesCameras(path):
         all_img = train_img + val_img
         ratio = 0.5
     else:  # for hypernerf
-        train_img = dataset_json['ids'][::4]
-        all_img = train_img
+        # train_img = dataset_json['ids'][::4]
+        # all_img = train_img
+        all_id = dataset_json['ids']
+        val_img = all_id[2::8]
+        train_img = [i for i in all_id if i not in val_img]
+        all_img = train_img + val_img
         ratio = 0.5
 
     train_num = len(train_img)
 
     all_cam = [meta_json[i]['camera_id'] for i in all_img]
-    all_time = [meta_json[i]['time_id'] for i in all_img]
+
+    time_id_name = 'time_id'
+    if time_id_name not in next(iter(meta_json.items()))[1]:
+        time_id_name = 'warp_id'
+
+    all_time = [meta_json[i][time_id_name] for i in all_img]
     max_time = max(all_time)
-    all_time = [meta_json[i]['time_id'] / max_time for i in all_img]
+    all_time = [meta_json[i][time_id_name] / max_time for i in all_img]
     selected_time = set(all_time)
 
     # all poses

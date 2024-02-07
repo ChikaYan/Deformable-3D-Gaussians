@@ -87,6 +87,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             viewpoint_cam.load2device()
         fid = viewpoint_cam.fid
 
+        d_sh = None
         if iteration < opt.warm_up:
             d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
         else:
@@ -94,10 +95,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             time_input = fid.unsqueeze(0).expand(N, -1)
 
             ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
-            d_xyz, d_rotation, d_scaling = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
+            d_xyz, d_rotation, d_scaling, d_sh = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
+            if not dataset.deform_sh:
+                d_sh = None
 
         # Render
-        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof)
+        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof, d_sh)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
             "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
         # depth = render_pkg_re["depth"]
@@ -129,7 +132,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Log and save
             cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                                        testing_iterations, scene, render, (pipe, background), deform,
-                                       dataset.load2gpu_on_the_fly, dataset.is_6dof)
+                                       dataset.load2gpu_on_the_fly, dataset.is_6dof, dataset.deform_sh)
             if iteration in testing_iterations:
                 if cur_psnr.item() > best_psnr:
                     best_psnr = cur_psnr.item()
@@ -188,7 +191,7 @@ def prepare_output_and_logger(args):
 
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc,
-                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False):
+                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False, deform_sh=False):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -213,9 +216,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     fid = viewpoint.fid
                     xyz = scene.gaussians.get_xyz
                     time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
+                    d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
+                    if not deform_sh:
+                        d_sh = None
                     image = torch.clamp(
-                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, is_6dof)["render"],
+                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)["render"],
                         0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     images = torch.cat((images, image.unsqueeze(0)), dim=0)
