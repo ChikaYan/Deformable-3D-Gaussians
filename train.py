@@ -16,12 +16,15 @@ from utils.loss_utils import l1_loss, ssim, kl_divergence
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, DeformModel
+from scene.refine_model import RefineModel
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import torchvision
+from pathlib import Path
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -33,9 +36,15 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, dataset.use_ex_feature)
     deform = DeformModel(dataset.is_blender, dataset.is_6dof)
     deform.train_setting(opt)
+
+    if dataset.use_ex_feature:
+        refine_model = RefineModel(feature_dim=gaussians.EX_FEATURE_DIM, t_multires=10)
+        refine_model.train_setting(opt)
+    else:
+        refine_model = None
 
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -52,6 +61,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     best_iteration = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
+
+    with (Path(dataset.model_path) / 'point_number.txt').open('w') as f:
+        f.write(f"\n")
+
     for iteration in range(1, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -105,6 +118,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
         # depth = render_pkg_re["depth"]
 
+        if dataset.use_ex_feature and iteration >= opt.warm_up_cnn_refinement:
+            # apply feature + CNN based appearance refinement
+            feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
+
+            time_input = fid.unsqueeze(0)
+            ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
+
+            refined_rgb = refine_model.step(feature_im, time_input + ast_noise)[0]
+
+            image = torch.clamp(image + refined_rgb, 0, 1)
+                
+
+
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -142,6 +168,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 deform.save_weights(args.model_path, iteration)
+                if dataset.use_ex_feature:
+                    refine_model.save_weights(args.model_path, iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -150,6 +178,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    print(f"new points: {gaussians._xyz.shape[0]}")
+                    with (Path(dataset.model_path) / 'point_number.txt').open('a') as f:
+                        f.write(f"Iter [{iteration}], Point: {gaussians._xyz.shape[0]}\n")
 
                 if iteration % opt.opacity_reset_interval == 0 or (
                         dataset.white_background and iteration == opt.densify_from_iter):
@@ -163,6 +194,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 deform.optimizer.zero_grad()
                 deform.update_learning_rate(iteration)
+
+            if iteration % args.log_im_every == 0:
+                train_log_path = Path(dataset.model_path) / 'train_log'
+                train_log_path.mkdir(exist_ok=True, parents=True)
+                torchvision.utils.save_image(image, os.path.join(str(train_log_path), '{0:05d}'.format(iteration) + ".png"))
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
@@ -265,6 +301,7 @@ if __name__ == "__main__":
                         default=[5000, 6000, 7_000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument('--log_im_every', type=int, default=1000)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 

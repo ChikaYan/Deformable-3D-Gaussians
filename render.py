@@ -21,11 +21,12 @@ from utils.pose_utils import pose_spherical, render_wander_path
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+from scene.refine_model import RefineModel
 import imageio
 import numpy as np
 
 
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
+def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh, refine_model=None):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
@@ -47,6 +48,14 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         rendering = results["render"]
         depth = results["depth"]
         depth = depth / (depth.max() + 1e-5)
+
+        if refine_model is not None:
+            feature_im = results["feature_im"] # [h, w, EX_FEATURE_DIM]
+            time_input = fid.unsqueeze(0)
+            refined_rgb = refine_model.step(feature_im, time_input)[0]
+            rendering = torch.clamp(rendering + refined_rgb, 0, 1)
+
+            # import pdb; pdb.set_trace()
 
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
@@ -285,10 +294,15 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
                 mode: str):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel(dataset.sh_degree, dataset.use_ex_feature)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         deform = DeformModel(dataset.is_blender, dataset.is_6dof)
         deform.load_weights(dataset.model_path)
+
+        if dataset.use_ex_feature:
+            refine_model = RefineModel(feature_dim=gaussians.EX_FEATURE_DIM, t_multires=10)
+        else:
+            refine_model = None
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -309,12 +323,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform, dataset.deform_sh)
+                        background, deform, dataset.deform_sh, refine_model=refine_model)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform, dataset.deform_sh)
+                        background, deform, dataset.deform_sh, refine_model=refine_model)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+# from diff_gaussian_rasterization_feature import GaussianRasterizationSettings, GaussianRasterizer
+from diff_gaussian_rasterization_feature import GaussianRasterizer as GaussianRasterizerFeature
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.rigid_utils import from_homogenous, to_homogenous
@@ -29,7 +31,7 @@ def quaternion_multiply(q1, q2):
     return torch.stack((w, x, y, z), dim=-1)
 
 
-def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False, d_sh=None,
+def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False, d_sh=None, use_ex_feature=False,
            scaling_modifier=1.0, override_color=None):
     """
     Render the scene. 
@@ -63,7 +65,11 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         debug=pipe.debug,
     )
 
-    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+    if pc.use_ex_feature:
+        rasterizer = GaussianRasterizerFeature(raster_settings=raster_settings)
+    else:
+        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+    # rasterizer = GaussianRasterizerFeature(raster_settings=raster_settings)
 
     if is_6dof:
         if torch.is_tensor(d_xyz) is False:
@@ -92,7 +98,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
     shs = None
     colors_precomp = None
     if colors_precomp is None:
-        if pipe.convert_SHs_python:
+        if pipe.convert_SHs_python or pc.use_ex_feature:
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree + 1) ** 2)
             dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
@@ -105,7 +111,13 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
     else:
         colors_precomp = override_color
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    ## Integrated feature query pipeline ###
+    if pc.use_ex_feature:
+        assert shs is None
+        colors_precomp = torch.concat([colors_precomp, pc.get_ex_features], axis=-1)
+        # colors_precomp = torch.concat([colors_precomp, torch.zeros_like(pc.get_ex_features)], axis=-1)
+    # colors_precomp = torch.concat([colors_precomp, torch.zeros([colors_precomp.shape[0], 64]).type_as(colors_precomp)], axis=-1)
+    
     rendered_image, radii, depth = rasterizer(
         means3D=means3D,
         means2D=means2D,
@@ -115,6 +127,43 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         scales=scales,
         rotations=rotations,
         cov3D_precomp=cov3D_precomp)
+    
+    rendered_feature_im = rendered_image[3:,...]
+    rendered_image = rendered_image[:3,...]
+    #########################################   
+
+        
+
+    # ### seprated feature query pipeline ###
+    # if pc.use_ex_feature:
+    #     # render again to gather features
+    #     rasterizer_feature = GaussianRasterizerFeature(raster_settings=raster_settings)
+    #     rendered_feature_im, _ , _ = rasterizer_feature(
+    #         means3D=means3D,
+    #         means2D=means2D,
+    #         shs=None,
+    #         colors_precomp=pc.get_ex_features,
+    #         opacities=opacity,
+    #         scales=scales,
+    #         rotations=rotations,
+    #         cov3D_precomp=cov3D_precomp)
+    #     rendered_feature_im = rendered_feature_im[:pc.EX_FEATURE_DIM, ...]
+    # else:
+    #     rendered_feature_im = None
+
+    # # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    # rendered_image, radii, depth = rasterizer(
+    #     means3D=means3D,
+    #     means2D=means2D,
+    #     shs=shs,
+    #     colors_precomp=colors_precomp,
+    #     opacities=opacity,
+    #     scales=scales,
+    #     rotations=rotations,
+    #     cov3D_precomp=cov3D_precomp)
+    # ##########################################
+
+    
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -122,4 +171,6 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
             "viewspace_points": screenspace_points,
             "visibility_filter": radii > 0,
             "radii": radii,
-            "depth": depth}
+            "depth": depth,
+            "feature_im": rendered_feature_im,
+            }

@@ -61,6 +61,7 @@ class ModelParams(ParamGroup):
         self.is_blender = False
         self.is_6dof = False
         self.deform_sh = False
+        self.use_ex_feature = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -71,7 +72,8 @@ class ModelParams(ParamGroup):
 
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
-        self.convert_SHs_python = False
+        # self.convert_SHs_python = False
+        self.convert_SHs_python = True
         self.compute_cov3D_python = False
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
@@ -81,12 +83,14 @@ class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 40_000
         self.warm_up = 3_000
+        self.warm_up_cnn_refinement = 20_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.deform_lr_max_steps = 40_000
         self.feature_lr = 0.0025
+        self.ex_feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.001
         self.rotation_lr = 0.001
