@@ -44,6 +44,9 @@ class Scene:
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "ori_imgs")):
+            print("Found ori_imgs folder, assuming nerfbs dataset!")
+            scene_info = sceneLoadTypeCallbacks["nerfblendshape"](args.source_path, args.eval, args.is_debug, args.novel_view, args.only_head)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)

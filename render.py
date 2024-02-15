@@ -39,8 +39,9 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         if load2gpu_on_the_fly:
             view.load2device()
         fid = view.fid
+        exp = view.exp
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        time_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
         d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
         if not deform_sh:
             d_sh = None
@@ -51,7 +52,7 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
 
         if refine_model is not None:
             feature_im = results["feature_im"] # [h, w, EX_FEATURE_DIM]
-            time_input = fid.unsqueeze(0)
+            time_input = exp.unsqueeze(0)
             refined_rgb = refine_model.step(feature_im, time_input)[0]
             rendering = torch.clamp(rendering + refined_rgb, 0, 1)
 
@@ -296,11 +297,19 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, dataset.use_ex_feature)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        deform = DeformModel(dataset.is_blender, dataset.is_6dof)
+        t_dim = scene.train_cameras[1.0][0].exp.shape[-1]
+        deform = DeformModel(t_dim=t_dim, is_blender=dataset.is_blender, is_6dof=dataset.is_6dof)
         deform.load_weights(dataset.model_path)
 
         if dataset.use_ex_feature:
-            refine_model = RefineModel(feature_dim=gaussians.EX_FEATURE_DIM, t_multires=10)
+            refine_model = RefineModel(
+                t_dim=t_dim,
+                feature_dim=gaussians.EX_FEATURE_DIM, 
+                t_multires=0, 
+                cnn_out_rescale=dataset.cnn_out_rescale,
+                cnn_type=dataset.cnn_type,
+                )
+            refine_model.load_weights(dataset.model_path)
         else:
             refine_model = None
 

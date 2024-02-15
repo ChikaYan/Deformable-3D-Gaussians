@@ -10,9 +10,11 @@ from utils.time_utils import get_embedder
 # from https://github.com/NVIDIA/pix2pixHD/blob/master/models/networks.py
 class Pix2PixDecoder(nn.Module):
     def __init__(self, input_nc=256, output_nc=3, ngf=256, n_upsampling=0, n_blocks=6, norm_layer=nn.BatchNorm2d, 
-                 padding_type='reflect'):
+                 padding_type='reflect', out_rescale=1):
         assert(n_blocks >= 0)
         super(Pix2PixDecoder, self).__init__()        
+        self.out_rescale = out_rescale
+
         activation = nn.ReLU(True)        
 
         model = [nn.ReflectionPad2d(3), nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0), norm_layer(ngf), activation]
@@ -28,15 +30,18 @@ class Pix2PixDecoder(nn.Module):
             model += [nn.ConvTranspose2d(int(ngf * mult), int(ngf * mult / 2), kernel_size=3, stride=2, padding=1, output_padding=1),
                        norm_layer(int(ngf * mult / 2)), activation]
         # import pdb; pdb.set_trace()
-        model += [nn.ReflectionPad2d(3), nn.Conv2d(int(ngf * mult / 2), output_nc, kernel_size=7, padding=0), nn.Tanh()]        
+        model += [nn.ReflectionPad2d(3), nn.Conv2d(int(ngf * mult / 2), output_nc, kernel_size=7, padding=0)]        
         self.model = nn.Sequential(*model)
+
         # self.models = model
             
     def forward(self, input):
         # for i,m in enumerate(self.models):
         #     print(i)
         #     input = m.to(input.device)(input)
-        return self.model(input)  
+        out = self.model(input)
+        out = torch.tanh(out * self.out_rescale)
+        return out
     
 class ResnetBlock(nn.Module):
     def __init__(self, dim, padding_type, norm_layer, activation=nn.ReLU(True), use_dropout=False):
@@ -81,13 +86,13 @@ class ResnetBlock(nn.Module):
 
 
 class RefineModel:
-    def __init__(self, feature_dim=256, t_multires=10, n_blocks=2):
+    def __init__(self, t_dim=1, feature_dim=256, t_multires=0, n_blocks=2, cnn_out_rescale=0.001, cnn_type='pix2pix'):
         self.t_multires = t_multires
-        self.embed_time_fn, time_input_ch = get_embedder(t_multires, 1)
+        self.embed_time_fn, time_input_ch = get_embedder(t_multires, t_dim)
         self.optimizer = None
         self.spatial_lr_scale = 5
 
-        self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks).cuda()
+        self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks, out_rescale=cnn_out_rescale).cuda()
 
     def step(self, x, t):
         # fetch time embedding

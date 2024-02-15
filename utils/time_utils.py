@@ -56,16 +56,17 @@ class Embedder:
 
 
 class DeformNetwork(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False, t_dim=1, ):
         super(DeformNetwork, self).__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
         self.output_ch = output_ch
-        self.t_multires = 6 if is_blender else 10
+        # self.t_multires = 6 if is_blender else 10
+        self.t_multires = 0
         self.skips = [D // 2]
 
-        self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
+        self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, t_dim)
         self.embed_fn, xyz_input_ch = get_embedder(multires, 3)
         self.input_ch = xyz_input_ch + time_input_ch
 

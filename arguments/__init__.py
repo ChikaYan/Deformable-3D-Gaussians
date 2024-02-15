@@ -62,6 +62,11 @@ class ModelParams(ParamGroup):
         self.is_6dof = False
         self.deform_sh = False
         self.use_ex_feature = False
+        self.novel_view = False
+        self.only_head = False
+        self.is_debug = False
+        self.cnn_out_rescale = 0.001
+        self.cnn_type = 'pix2pix' # pix2pix, stylegan2
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

@@ -37,16 +37,26 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, dataset.use_ex_feature)
-    deform = DeformModel(dataset.is_blender, dataset.is_6dof)
+
+
+    scene = Scene(dataset, gaussians)
+
+    t_dim = scene.train_cameras[1.0][0].exp.shape[-1]
+    deform = DeformModel(t_dim=t_dim, is_blender=dataset.is_blender, is_6dof=dataset.is_6dof)
     deform.train_setting(opt)
 
     if dataset.use_ex_feature:
-        refine_model = RefineModel(feature_dim=gaussians.EX_FEATURE_DIM, t_multires=10)
+        refine_model = RefineModel(
+            t_dim=t_dim,
+            feature_dim=gaussians.EX_FEATURE_DIM, 
+            t_multires=0, 
+            cnn_out_rescale=dataset.cnn_out_rescale,
+            cnn_type=dataset.cnn_type,
+            )
         refine_model.train_setting(opt)
     else:
         refine_model = None
 
-    scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -99,15 +109,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         if dataset.load2gpu_on_the_fly:
             viewpoint_cam.load2device()
         fid = viewpoint_cam.fid
+        exp = viewpoint_cam.exp
 
         d_sh = None
         if iteration < opt.warm_up:
             d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
         else:
             N = gaussians.get_xyz.shape[0]
-            time_input = fid.unsqueeze(0).expand(N, -1)
+            time_input = exp.unsqueeze(0).expand(N, -1)
 
-            ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
+            # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
+            ast_noise = 0
             d_xyz, d_rotation, d_scaling, d_sh = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
             if not dataset.deform_sh:
                 d_sh = None
@@ -122,14 +134,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # apply feature + CNN based appearance refinement
             feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
-            time_input = fid.unsqueeze(0)
+            time_input = exp.unsqueeze(0)
             ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
 
             refined_rgb = refine_model.step(feature_im, time_input + ast_noise)[0]
 
             image = torch.clamp(image + refined_rgb, 0, 1)
-                
-
+            
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -250,8 +261,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     if load2gpu_on_the_fly:
                         viewpoint.load2device()
                     fid = viewpoint.fid
+                    exp = viewpoint.exp
                     xyz = scene.gaussians.get_xyz
-                    time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+                    time_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
                     d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
                     if not deform_sh:
                         d_sh = None

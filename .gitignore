@@ -9,3 +9,7 @@ screenshots
 .idea
 
 data/
+
+script/
+
+slurm_out/
