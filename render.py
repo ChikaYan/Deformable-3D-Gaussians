@@ -24,28 +24,56 @@ from gaussian_renderer import GaussianModel
 from scene.refine_model import RefineModel
 import imageio
 import numpy as np
+import pickle
+from argparse import Namespace
 
 
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh, refine_model=None):
+def render_set(
+        model_path, 
+        load2gpu_on_the_fly, 
+        is_6dof, 
+        name, 
+        iteration, 
+        views, 
+        gaussians, 
+        pipeline, 
+        background, 
+        deform, 
+        deform_sh, 
+        refine_model=None, 
+        model_args=None,
+        args=None,
+        ):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
+    pre_refine_path = os.path.join(model_path, name, "ours_{}".format(iteration), "pre_refine")
+    refine_path = os.path.join(model_path, name, "ours_{}".format(iteration), "refine")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
+    makedirs(pre_refine_path, exist_ok=True)
+    makedirs(refine_path, exist_ok=True)
+
+
+    imgs = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         if load2gpu_on_the_fly:
             view.load2device()
         fid = view.fid
         exp = view.exp
+        # if idx == 0:
+        #     exp = view.exp
+        # else:
+        #     pass
         xyz = gaussians.get_xyz
         time_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
         d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
         if not deform_sh:
             d_sh = None
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh, render_ex_feature=model_args.use_ex_feature)
         rendering = results["render"]
         depth = results["depth"]
         depth = depth / (depth.max() + 1e-5)
@@ -54,14 +82,29 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
             feature_im = results["feature_im"] # [h, w, EX_FEATURE_DIM]
             time_input = exp.unsqueeze(0)
             refined_rgb = refine_model.step(feature_im, time_input)[0]
-            rendering = torch.clamp(rendering + refined_rgb, 0, 1)
 
+            torchvision.utils.save_image(rendering, os.path.join(pre_refine_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(refined_rgb, os.path.join(refine_path, '{0:05d}'.format(idx) + ".png"))
+
+            if model_args.refine_mode == 'add':
+                rendering = torch.clamp(rendering + refined_rgb, 0, 1)
+            elif model_args.refine_mode == 'replace':
+                if model_args.refine_parser_type == 'pix2pix':
+                    refined_rgb = (refined_rgb + 1.) / 2.
+                rendering = torch.clamp(refined_rgb, 0, 1)
+            else:
+                raise NotImplementedError(f"refine mode {model_args.refine_mode} not supported")
+            
             # import pdb; pdb.set_trace()
 
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+        imgs.append(rendering)
+    
+    if not args.no_vid:
+        torchvision.io.write_video(os.path.join(model_path, name, "ours_{}".format(iteration), "renders.mp4"), torch.vstack(imgs), fps=30)
 
 
 def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
@@ -293,9 +336,10 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 
 
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str):
+                mode: str, args):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, dataset.use_ex_feature)
+        dataset.is_test = True
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         t_dim = scene.train_cameras[1.0][0].exp.shape[-1]
         deform = DeformModel(t_dim=t_dim, is_blender=dataset.is_blender, is_6dof=dataset.is_6dof)
@@ -307,7 +351,7 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
                 feature_dim=gaussians.EX_FEATURE_DIM, 
                 t_multires=0, 
                 cnn_out_rescale=dataset.cnn_out_rescale,
-                cnn_type=dataset.cnn_type,
+                parser_type=dataset.refine_parser_type,
                 )
             refine_model.load_weights(dataset.model_path)
         else:
@@ -331,13 +375,13 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
-                        scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform, dataset.deform_sh, refine_model=refine_model)
+                        scene.getTrainCameras()[:50], gaussians, pipeline,
+                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, no_vid=args.no_vid)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform, dataset.deform_sh, refine_model=refine_model)
+                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, no_vid=args.no_vid)
 
 
 if __name__ == "__main__":
@@ -349,6 +393,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--no_vid", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
@@ -356,4 +401,15 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode)
+    with open(args.model_path  + '/cfg_args', 'r') as f:
+        ns = f.read()
+        print(ns)
+        saved_args = parser.parse_args(namespace=eval(ns))
+
+
+        for k in saved_args.__dict__:
+            if saved_args.__dict__[k] is None and hasattr(model, k):
+                saved_args.__dict__[k] = getattr(model, k)
+        # import pdb; pdb.set_trace()
+
+    render_sets(model.extract(saved_args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, args)
