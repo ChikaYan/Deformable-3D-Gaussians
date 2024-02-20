@@ -119,7 +119,8 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
         if self.use_ex_feature:
-            self._ex_features = nn.Parameter(torch.randn([self._xyz.shape[0], self.EX_FEATURE_DIM]).contiguous().requires_grad_(True).type_as(self._features_dc))
+            self._ex_features = nn.Parameter(1e-4 * (torch.randn([self._xyz.shape[0], self.EX_FEATURE_DIM])).contiguous().type_as(self._features_dc).requires_grad_(True))
+            # self._ex_features = nn.Parameter(torch.zeros([self._xyz.shape[0], self.EX_FEATURE_DIM]).contiguous().type_as(self._features_dc).requires_grad_(True))
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense

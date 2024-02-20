@@ -5,94 +5,45 @@ import os
 from utils.system_utils import searchForMaxIteration
 from utils.general_utils import get_expon_lr_func
 from utils.time_utils import get_embedder
-
-
-# from https://github.com/NVIDIA/pix2pixHD/blob/master/models/networks.py
-class Pix2PixDecoder(nn.Module):
-    def __init__(self, input_nc=256, output_nc=3, ngf=256, n_upsampling=0, n_blocks=6, norm_layer=nn.BatchNorm2d, 
-                 padding_type='reflect', out_rescale=1):
-        assert(n_blocks >= 0)
-        super(Pix2PixDecoder, self).__init__()        
-        self.out_rescale = out_rescale
-
-        activation = nn.ReLU(True)        
-
-        model = [nn.ReflectionPad2d(3), nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0), norm_layer(ngf), activation]
-
-        ### resnet blocks
-        for i in range(n_blocks):
-            model += [ResnetBlock(ngf, padding_type=padding_type, activation=activation, norm_layer=norm_layer)]
-        
-        ### upsample      
-        mult = 2 # needed when n_upsampling=0
-        for i in range(n_upsampling):
-            mult = 2**(-i)
-            model += [nn.ConvTranspose2d(int(ngf * mult), int(ngf * mult / 2), kernel_size=3, stride=2, padding=1, output_padding=1),
-                       norm_layer(int(ngf * mult / 2)), activation]
-        # import pdb; pdb.set_trace()
-        model += [nn.ReflectionPad2d(3), nn.Conv2d(int(ngf * mult / 2), output_nc, kernel_size=7, padding=0)]        
-        self.model = nn.Sequential(*model)
-
-        # self.models = model
-            
-    def forward(self, input):
-        # for i,m in enumerate(self.models):
-        #     print(i)
-        #     input = m.to(input.device)(input)
-        out = self.model(input)
-        out = torch.tanh(out * self.out_rescale)
-        return out
-    
-class ResnetBlock(nn.Module):
-    def __init__(self, dim, padding_type, norm_layer, activation=nn.ReLU(True), use_dropout=False):
-        super(ResnetBlock, self).__init__()
-        self.conv_block = self.build_conv_block(dim, padding_type, norm_layer, activation, use_dropout)
-
-    def build_conv_block(self, dim, padding_type, norm_layer, activation, use_dropout):
-        conv_block = []
-        p = 0
-        if padding_type == 'reflect':
-            conv_block += [nn.ReflectionPad2d(1)]
-        elif padding_type == 'replicate':
-            conv_block += [nn.ReplicationPad2d(1)]
-        elif padding_type == 'zero':
-            p = 1
-        else:
-            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-
-        conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p),
-                       norm_layer(dim),
-                       activation]
-        if use_dropout:
-            conv_block += [nn.Dropout(0.5)]
-
-        p = 0
-        if padding_type == 'reflect':
-            conv_block += [nn.ReflectionPad2d(1)]
-        elif padding_type == 'replicate':
-            conv_block += [nn.ReplicationPad2d(1)]
-        elif padding_type == 'zero':
-            p = 1
-        else:
-            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-        conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p),
-                       norm_layer(dim)]
-
-        return nn.Sequential(*conv_block)
-
-    def forward(self, x):
-        out = x + self.conv_block(x)
-        return out
+from utils.stylegan2.networks import Generator as StyleGan2Gen
+from .refine_nets.pix2pix import Pix2PixDecoder
+from .refine_nets.mlp import RefineMLPDecoder
+from .refine_nets.unet import RefineUnetDecoder
 
 
 class RefineModel:
-    def __init__(self, t_dim=1, feature_dim=256, t_multires=0, n_blocks=2, cnn_out_rescale=0.001, cnn_type='pix2pix'):
+    def __init__(self, t_dim=1, feature_dim=256, t_multires=0, n_blocks=2, cnn_out_rescale=0.001, parser_type='pix2pix', im_res=(512,512)):
         self.t_multires = t_multires
         self.embed_time_fn, time_input_ch = get_embedder(t_multires, t_dim)
         self.optimizer = None
-        self.spatial_lr_scale = 5
 
-        self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks, out_rescale=cnn_out_rescale).cuda()
+        self.parser_type = parser_type
+        if parser_type == 'pix2pix':
+            self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks, out_rescale=cnn_out_rescale).cuda()
+        elif parser_type == 'mlp':
+            self.network = RefineMLPDecoder(input_ch=feature_dim + time_input_ch, out_rescale=cnn_out_rescale).cuda()
+        elif parser_type == 'unet':
+            self.network = RefineUnetDecoder(in_channels=feature_dim + time_input_ch, out_rescale=cnn_out_rescale).cuda()
+        elif parser_type == 'stylegan2':
+            raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
+            self.network = StyleGan2Gen(
+                z_dim=t_dim,
+                c_dim=0,
+                w_dim=128,
+                img_resolution=im_res,
+                img_channels=3,
+                mapping_kwargs={
+                    'num_layers': 2,
+                },
+                synthesis_kwargs={
+                    'channel_base': 32768,
+                    'channel_max': 512,
+                    'num_fp16_res': 4,
+                    'conv_clamp': 256
+                }
+            )
+        else:
+            raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
 
     def step(self, x, t):
         # fetch time embedding
@@ -105,15 +56,15 @@ class RefineModel:
     def train_setting(self, training_args):
         l = [
             {'params': list(self.network.parameters()),
-             'lr': training_args.position_lr_init * self.spatial_lr_scale,
+             'lr': training_args.refine_lr_init,
              "name": "refine"}
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
-        self.deform_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init * self.spatial_lr_scale,
-                                                       lr_final=training_args.position_lr_final,
-                                                       lr_delay_mult=training_args.position_lr_delay_mult,
-                                                       max_steps=training_args.deform_lr_max_steps)
+        self.scheduler_args = get_expon_lr_func(lr_init=training_args.refine_lr_init,
+                                                       lr_final=training_args.refine_lr_final,
+                                                       lr_delay_mult=training_args.refine_lr_delay_mult,
+                                                       max_steps=training_args.refine_lr_max_steps)
 
     def save_weights(self, model_path, iteration):
         out_weights_path = os.path.join(model_path, "refine/iteration_{}".format(iteration))
@@ -131,6 +82,6 @@ class RefineModel:
     def update_learning_rate(self, iteration):
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "refine":
-                lr = self.deform_scheduler_args(iteration)
+                lr = self.scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr

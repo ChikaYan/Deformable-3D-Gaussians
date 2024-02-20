@@ -14,6 +14,7 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 # from diff_gaussian_rasterization_feature import GaussianRasterizationSettings, GaussianRasterizer
 from diff_gaussian_rasterization_feature import GaussianRasterizer as GaussianRasterizerFeature
+# from diff_gaussian_rasterization_alpha_feature import GaussianRasterizer as GaussianRasterizerFeature
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.rigid_utils import from_homogenous, to_homogenous
@@ -31,8 +32,8 @@ def quaternion_multiply(q1, q2):
     return torch.stack((w, x, y, z), dim=-1)
 
 
-def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False, d_sh=None, use_ex_feature=False,
-           scaling_modifier=1.0, override_color=None):
+def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False, d_sh=None,
+           scaling_modifier=1.0, override_color=None, render_ex_feature=False):
     """
     Render the scene. 
     
@@ -65,7 +66,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         debug=pipe.debug,
     )
 
-    if pc.use_ex_feature:
+    if render_ex_feature:
         rasterizer = GaussianRasterizerFeature(raster_settings=raster_settings)
     else:
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -98,7 +99,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
     shs = None
     colors_precomp = None
     if colors_precomp is None:
-        if pipe.convert_SHs_python or pc.use_ex_feature:
+        if pipe.convert_SHs_python or render_ex_feature:
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree + 1) ** 2)
             dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
@@ -112,13 +113,14 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         colors_precomp = override_color
 
     ## Integrated feature query pipeline ###
-    if pc.use_ex_feature:
+    if render_ex_feature:
         assert shs is None
         colors_precomp = torch.concat([colors_precomp, pc.get_ex_features], axis=-1)
+        # colors_precomp = torch.concat([colors_precomp_, torch.zeros_like(pc.get_ex_features)], axis=-1)
         # colors_precomp = torch.concat([colors_precomp, torch.zeros_like(pc.get_ex_features)], axis=-1)
     # colors_precomp = torch.concat([colors_precomp, torch.zeros([colors_precomp.shape[0], 64]).type_as(colors_precomp)], axis=-1)
     
-    rendered_image, radii, depth = rasterizer(
+    rendered_image, radii, depth, alpha = rasterizer(
         means3D=means3D,
         means2D=means2D,
         shs=shs,
@@ -173,4 +175,5 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
             "radii": radii,
             "depth": depth,
             "feature_im": rendered_feature_im,
+            "alpha": alpha,
             }

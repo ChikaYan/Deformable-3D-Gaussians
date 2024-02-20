@@ -1,0 +1,35 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class RefineMLPDecoder(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], out_rescale=1):
+        """ 
+        """
+        super(RefineMLPDecoder, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.out_rescale = out_rescale
+        
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+        
+        self.output_linear = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        
+        input = x.permute([0,2,3,1]).view([-1, self.input_ch,])
+
+        h = input
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input, h], -1)
+
+        outputs = self.output_linear(h)
+        outputs = outputs.view([x.shape[0], *x.shape[2:], -1]).permute([0,3,1,2]) * self.out_rescale
+        return outputs

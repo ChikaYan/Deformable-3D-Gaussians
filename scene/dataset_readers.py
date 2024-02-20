@@ -28,6 +28,7 @@ from scene.gaussian_model import BasicPointCloud
 from utils.camera_utils import camera_nerfies_from_JSON
 from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
+import skimage
 
 
 
@@ -53,6 +54,7 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
+    background: Optional[np.array] = None
 
 
 def load_K_Rt_from_P(filename, P=None):
@@ -610,7 +612,118 @@ def readPlenopticVideoDataset(path, eval, num_images, hold_id=[0]):
     return scene_info
 
 
-def readNerfBlendShapeCameras(path, is_eval, is_debug, novel_view, only_head):
+def readNerfBlendShapeCameras(path, is_eval, is_debug, novel_view, only_head, is_test):
+    with open(os.path.join(path, "transforms.json"), 'r') as f:
+        meta_json = json.load(f)
+    
+    test_frames = -1_000
+    frames = meta_json['frames']
+    total_frames = len(frames)
+
+    if is_test:
+        frames = frames[test_frames:]
+        if is_debug:
+            frames = frames[-50:]
+    else:
+        if not is_eval:
+            print(f'Loading train dataset from {path}...')
+            frames = frames[0 : (total_frames + test_frames)]
+            if is_debug:
+                frames = frames[0: 50]
+        else:
+            print(f'Loading test dataset from {path}...')
+            frames = frames[-50:]
+            if is_debug:
+                frames = frames[-50:]
+
+    cam_infos = []
+    h, w = meta_json['h'], meta_json['w']
+    fx, fy, cx, cy = meta_json['fx'], meta_json['fy'], meta_json['cx'], meta_json['cy']
+    fovx = focal2fov(fx, pixels=w)
+    fovy = focal2fov(fy, h)
+
+    for idx, frame in enumerate(tqdm(frames, desc="Loading data into memory in advance")):
+        image_id = frame['img_id']
+        image_path = os.path.join(path, "ori_imgs", str(image_id)+'.jpg')
+        image = np.array(Image.open(image_path))
+        if not only_head:
+            mask_path = os.path.join(path, "mask", str(image_id+1)+'.png')
+            seg = cv.imread(mask_path, cv.IMREAD_GRAYSCALE)  
+            # Reference MODNet colab implementation
+            mask = np.repeat(np.asarray(seg)[:,:,None], 3, axis=2) / 255
+        else:    
+            mask_path = os.path.join(path, "parsing", str(image_id)+'.png')
+            seg = cv.imread(mask_path, cv.IMREAD_UNCHANGED) 
+            if seg.shape[-1] == 3:
+                seg = cv.cvtColor(seg, cv.COLOR_BGR2RGB)
+            else:
+                seg = cv.cvtColor(seg, cv.COLOR_BGRA2RGBA)
+            mask=(seg[:,:,0]==0)*(seg[:,:,1]==0)*(seg[:,:,2]==255)
+            mask = np.repeat(np.asarray(mask)[:,:,None], 3, axis=2)
+           
+        white_background = np.ones_like(image)* 255
+        image = Image.fromarray(np.uint8(image * mask + white_background * (1 - mask)))
+    
+        expression = np.array(frame['exp_ori']) 
+        if novel_view:
+            vec=np.array([0,0,0.3493212163448334])
+            rot_cycle=100
+            tmp_pose=np.identity(4,dtype=np.float32)
+            r1 = Rotation.from_euler('y', 15+(-30)*((idx % rot_cycle)/rot_cycle), degrees=True)
+            tmp_pose[:3,:3]=r1.as_matrix()
+            trans=tmp_pose[:3,:3]@vec
+            tmp_pose[0:3,3]=trans
+            c2w = tmp_pose
+        else:
+            c2w = np.array(frame['transform_matrix'])
+        c2w[:3, 1:3] *= -1
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  
+        T = w2c[:3, 3]
+
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovX=fovx, FovY=fovy, image=image, image_path=image_path,
+                                    image_name=image_id, width=image.size[0], height=image.size[1], exp=expression, 
+                                    fid=image_id
+                                    ))
+    '''finish load all data'''
+    return cam_infos
+
+def readNeRFBlendShapeDataset(path, eval, is_debug, novel_view, only_head, is_test):
+    print("Load NeRFBlendShape Train Dataset")
+    train_cam_infos = readNerfBlendShapeCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view, only_head=only_head, is_test=False)
+    print("Load NeRFBlendShape Test Dataset")
+    test_cam_infos = readNerfBlendShapeCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view, only_head=only_head, is_test=is_test)
+
+    if not eval: 
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+    
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    ply_path = os.path.join(path, "points3d.ply")
+    '''Init point cloud'''
+    if not os.path.exists(ply_path):
+        # Since mono dataset has no colmap, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd, 
+                           train_cameras=train_cam_infos, 
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization, 
+                           ply_path=ply_path)
+
+    return scene_info
+
+
+def readNerSembleCameras(path, is_eval, is_debug, novel_view):
     with open(os.path.join(path, "transforms.json"), 'r') as f:
         meta_json = json.load(f)
     
@@ -681,11 +794,12 @@ def readNerfBlendShapeCameras(path, is_eval, is_debug, novel_view, only_head):
     '''finish load all data'''
     return cam_infos
 
-def readNeRFBlendShapeDataset(path, eval, is_debug, novel_view, only_head):
+
+def readNerSembleDataset(path, eval, is_debug, novel_view):
     print("Load NeRFBlendShape Train Dataset")
-    train_cam_infos = readNerfBlendShapeCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view, only_head=only_head)
+    train_cam_infos = readNerSembleCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view)
     print("Load NeRFBlendShape Test Dataset")
-    test_cam_infos = readNerfBlendShapeCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view, only_head=only_head)
+    test_cam_infos = readNerSembleCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view)
 
     if not eval: 
         train_cam_infos.extend(test_cam_infos)
@@ -716,6 +830,277 @@ def readNeRFBlendShapeDataset(path, eval, is_debug, novel_view, only_head):
     return scene_info
 
 
+def readNerfaceCameras(path, is_eval, is_debug, novel_view, is_test=False):
+    
+    if is_eval:
+        fname = "transforms_val.json"
+    else:
+        fname = "transforms_train.json"
+
+    if is_test:
+        fname = "transforms_test.json"
+
+    with open(os.path.join(path, fname), 'r') as f:
+        meta_json = json.load(f)
+    
+    frames = meta_json['frames']
+    total_frames = len(frames)
+    
+    if not is_eval:
+        if is_debug:
+            frames = frames[0: 50]
+        print(f'Loading train dataset from {path}, len {len(frames)}...')
+    else:
+        frames = frames[-50:]
+        print(f'Loading test dataset from {path}, len {len(frames)}...')
+
+    cam_infos = []
+    h, w = 512, 512
+    camera_angle_x = float(meta_json["camera_angle_x"])
+    focal = 0.5 * w / np.tan(0.5 * camera_angle_x)
+    fx, fy, cx, cy = focal, focal, 0.5, 0.5
+    fovx = focal2fov(fx, pixels=w)
+    fovy = focal2fov(fy, h)
+
+    for idx, frame in enumerate(tqdm(frames, desc="Loading data into memory in advance")):
+        image_id_str = frame['file_path'].strip("./")
+        image_path = os.path.join(path, str(image_id_str)+'.png')
+        image = Image.fromarray(np.array(Image.open(image_path)))
+
+        image_id = int(image_id_str[-4:])
+        if is_eval or is_test:
+            image_id = 0
+        # if not only_head:
+        #     mask_path = os.path.join(path, "mask", str(image_id+1)+'.png')
+        #     seg = cv.imread(mask_path, cv.IMREAD_GRAYSCALE)  
+        #     # Reference MODNet colab implementation
+        #     mask = np.repeat(np.asarray(seg)[:,:,None], 3, axis=2) / 255
+        # else:    
+        #     mask_path = os.path.join(path, "parsing", str(image_id)+'.png')
+        #     seg = cv.imread(mask_path, cv.IMREAD_UNCHANGED) 
+        #     if seg.shape[-1] == 3:
+        #         seg = cv.cvtColor(seg, cv.COLOR_BGR2RGB)
+        #     else:
+        #         seg = cv.cvtColor(seg, cv.COLOR_BGRA2RGBA)
+        #     mask=(seg[:,:,0]==0)*(seg[:,:,1]==0)*(seg[:,:,2]==255)
+        #     mask = np.repeat(np.asarray(mask)[:,:,None], 3, axis=2)
+           
+        # white_background = np.ones_like(image)* 255
+        # image = Image.fromarray(np.uint8(image * mask + white_background * (1 - mask)))
+    
+        expression = np.array(frame['expression']) 
+        if novel_view:
+            print('novel view function for nerface not tested!')
+            vec=np.array([0,0,0.3493212163448334])
+            rot_cycle=100
+            tmp_pose=np.identity(4,dtype=np.float32)
+            r1 = Rotation.from_euler('y', 15+(-30)*((idx % rot_cycle)/rot_cycle), degrees=True)
+            tmp_pose[:3,:3]=r1.as_matrix()
+            trans=tmp_pose[:3,:3]@vec
+            tmp_pose[0:3,3]=trans
+            c2w = tmp_pose
+        else:
+            c2w = np.array(frame['transform_matrix'])
+        # c2w[:3, 1:3] *= -1
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  
+        T = w2c[:3, 3]
+
+        # matrix = np.linalg.inv(np.array(frame["transform_matrix"]))
+        # R = -np.transpose(matrix[:3, :3])
+        # R[:, 0] = -R[:, 0]
+        # T = -matrix[:3, 3]
+
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovX=fovx, FovY=fovy, image=image, image_path=image_path,
+                                    image_name=image_id_str, width=image.size[0], height=image.size[1], exp=expression, 
+                                    fid=image_id
+                                    ))
+    '''finish load all data'''
+    return cam_infos
+
+def readNerfaceDataset(path, eval, is_debug, novel_view, is_test):
+    print("Load Nerface Train Dataset")
+    train_cam_infos = readNerfaceCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view, is_test=False)
+    print("Load Nerface Test Dataset")
+    test_cam_infos = readNerfaceCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view, is_test=is_test)
+
+    if not eval: 
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+    
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    ply_path = os.path.join(path, "points3d.ply")
+    '''Init point cloud'''
+    if not os.path.exists(ply_path):
+        # Since mono dataset has no colmap, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    # load background
+    background = np.array(Image.open(os.path.join(path, 'bg', '00001.png')))
+
+    scene_info = SceneInfo(point_cloud=pcd, 
+                           train_cameras=train_cam_infos, 
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization, 
+                           ply_path=ply_path,
+                           background=background,
+                           )
+
+    return scene_info
+
+
+def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
+    
+    if is_eval or is_test:
+        sub_dir = ['MVI_1812']
+        subsample = 200
+    else:
+        sub_dir = ['MVI_1810', 'MVI_1814']
+        subsample = 1
+
+    img_res = [512,512]
+    h, w = img_res
+    cam_infos = []
+
+    image_id = 0
+    for dir in sub_dir:
+        instance_dir = os.path.join(path, dir)
+        assert os.path.exists(instance_dir), "Data directory is empty"
+
+        cam_file = '{0}/{1}'.format(instance_dir, 'flame_params.json')
+
+        with open(cam_file, 'r') as f:
+            camera_dict = json.load(f)
+        
+        focal_cxcy = camera_dict['intrinsics']
+        # construct intrinsic matrix in pixels
+        intrinsics = np.eye(3)
+        if focal_cxcy[3] > 1:
+            # An old format of my datasets...
+            intrinsics[0, 0] = focal_cxcy[0] * img_res[0] / 512
+            intrinsics[1, 1] = focal_cxcy[1] * img_res[1] / 512
+            intrinsics[0, 2] = focal_cxcy[2] * img_res[0] / 512
+            intrinsics[1, 2] = focal_cxcy[3] * img_res[1] / 512
+        else:
+            intrinsics[0, 0] = focal_cxcy[0] * img_res[0]
+            intrinsics[1, 1] = focal_cxcy[1] * img_res[1]
+            intrinsics[0, 2] = focal_cxcy[2] * img_res[0]
+            intrinsics[1, 2] = focal_cxcy[3] * img_res[1]
+
+        fx, fy, cx, cy = intrinsics[0,0], intrinsics[1,1], intrinsics[0,2], intrinsics[1,2]
+        fovx = focal2fov(fx, pixels=w)
+        fovy = focal2fov(fy, h)
+
+        for idx in range(0, len(camera_dict['frames']), subsample):
+            frame = camera_dict['frames'][idx]
+            # world to camera matrix
+            world_mat = np.array(frame['world_mat']).astype(np.float32)
+            # camera to world matrix
+            pose = load_K_Rt_from_P(None, world_mat)[1]
+            a = pose[0:1, :]
+            b = pose[1:2, :]
+            c = pose[2:3, :]
+            pose = np.concatenate([a, -c, -b, pose[3:, :]], 0)
+            S = np.eye(3)
+            S[1, 1] = -1
+            S[2, 2] = -1
+            pose[1, 3] = -pose[1, 3]
+            pose[2, 3] = -pose[2, 3]
+            pose[:3, :3] = S @ pose[:3, :3] @ S
+            a = pose[0:1, :]
+            b = pose[1:2, :]
+            c = pose[2:3, :]
+            pose = np.concatenate([a, c, b, pose[3:, :]], 0)
+            pose[:, 3] *= 0.5
+            matrix = np.linalg.inv(pose)
+            R = -np.transpose(matrix[:3, :3])
+            R[:, 0] = -R[:, 0]
+            T = -matrix[:3, 3]
+
+
+            expression = np.array(frame['expression']).astype(np.float32)
+            flame_pose = np.array(frame['pose']).astype(np.float32) # not sure if needed
+            image_path = '{0}/{1}.png'.format(instance_dir, frame["file_path"])
+            mask_path = image_path.replace('image', 'mask')
+            # if use_semantics:
+            #     semantic_paths = image_path.replace('image', 'semantic')
+            img_name = int(frame["file_path"].split('/')[-1])
+            # bbox = ((np.array(frame['bbox']) + 1.) * np.array([img_res[0],img_res[1],img_res[0],img_res[1]])/ 2).astype(int)
+
+            mask = imageio.imread(mask_path, as_gray=True)
+            mask = skimage.img_as_float32(mask)
+            mask = mask > 127.5
+
+            image = np.array(Image.open(image_path))
+            image[~mask] = 255
+            image = Image.fromarray(image)
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovX=fovx, FovY=fovy, image=image, image_path=image_path,
+                                image_name=img_name, width=image.size[0], height=image.size[1], exp=expression, 
+                                fid=image_id
+                                ))
+            if not is_eval and not is_test:
+                image_id += 1
+
+            if is_debug and image_id > 50:
+                break
+
+    # shape_params = np.array(camera_dict['shape_params']).astype(np.float32).unsqueeze(0)
+
+
+    return cam_infos
+
+def readIMAvatarDataset(path, eval, is_debug, novel_view, is_test):
+    print("Load IMAvatar Train Dataset")
+    train_cam_infos = readIMAvatarCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view, is_test=False)
+    print("Load IMAvatar Test Dataset")
+    test_cam_infos = readIMAvatarCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view, is_test=is_test)
+
+    if not eval: 
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+    
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    ply_path = os.path.join(path, "points3d.ply")
+    '''Init point cloud'''
+    # if not os.path.exists(ply_path):
+    # Since mono dataset has no colmap, we start with random points
+    num_pts = 10_000
+    print(f"Generating random point cloud ({num_pts})...")
+    # xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+    xyz = np.random.random((num_pts, 3)) * 3
+    shs = np.random.random((num_pts, 3)) / 255.0
+    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+    storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    # try:
+    #     pcd = fetchPly(ply_path)
+    # except:
+    #     pcd = None
+
+    # load background
+    # background = np.array(Image.open(os.path.join(path, 'bg', '00001.png')))
+
+    scene_info = SceneInfo(point_cloud=pcd, 
+                           train_cameras=train_cam_infos, 
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization, 
+                           ply_path=ply_path,
+                           background=None,
+                           )
+
+    return scene_info
+
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,  # colmap dataset reader from official 3D Gaussian [https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/]
     "Blender": readNerfSyntheticInfo,  # D-NeRF dataset [https://drive.google.com/file/d/1uHVyApwqugXTFuIRRlE4abTW8_rrVeIK/view?usp=sharing]
@@ -723,4 +1108,7 @@ sceneLoadTypeCallbacks = {
     "nerfies": readNerfiesInfo,  # NeRFies & HyperNeRF dataset proposed by [https://github.com/google/hypernerf/releases/tag/v0.1]
     "plenopticVideo": readPlenopticVideoDataset,  # Neural 3D dataset in [https://github.com/facebookresearch/Neural_3D_Video]
     "nerfblendshape": readNeRFBlendShapeDataset,  
+    "nersemble": readNerSembleDataset,  
+    "nerface": readNerfaceDataset,  
+    "imavatar": readIMAvatarDataset,  
 }

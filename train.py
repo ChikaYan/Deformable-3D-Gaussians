@@ -51,7 +51,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             feature_dim=gaussians.EX_FEATURE_DIM, 
             t_multires=0, 
             cnn_out_rescale=dataset.cnn_out_rescale,
-            cnn_type=dataset.cnn_type,
+            parser_type=dataset.refine_parser_type,
             )
         refine_model.train_setting(opt)
     else:
@@ -60,6 +60,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     gaussians.training_setup(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    if scene.background is not None:
+        bg_color = [0,0,0]
+        scene_background = torch.from_numpy(scene.background).permute([2,0,1]) / 255.
+        scene_background = scene_background.to('cuda')
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     iter_start = torch.cuda.Event(enable_timing=True)
@@ -125,21 +129,42 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 d_sh = None
 
         # Render
-        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof, d_sh)
+        render_ex_feature = dataset.use_ex_feature and iteration >= opt.warm_up_cnn_refinement
+        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof, d_sh, render_ex_feature=render_ex_feature)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
             "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
-        # depth = render_pkg_re["depth"]
+        alpha = render_pkg_re["alpha"]
+
+        if scene.background is not None:
+            # composite with background image
+            image = image + (1-alpha) * scene_background
 
         if dataset.use_ex_feature and iteration >= opt.warm_up_cnn_refinement:
             # apply feature + CNN based appearance refinement
             feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
             time_input = exp.unsqueeze(0)
-            ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
+            # time_input = torch.zeros_like(exp.unsqueeze(0))
+            # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
 
-            refined_rgb = refine_model.step(feature_im, time_input + ast_noise)[0]
+            refined_rgb = refine_model.step(feature_im, time_input)[0]
 
-            image = torch.clamp(image + refined_rgb, 0, 1)
+            pre_refine_img = image
+
+            if dataset.refine_mode == 'add':
+                image = torch.clamp(image + refined_rgb, 0, 1)
+            elif dataset.refine_mode == 'replace':
+                # assert opt.warm_up_cnn_refinement == 0
+                
+                if dataset.refine_parser_type == 'pix2pix':
+                    refined_rgb = (refined_rgb + 1.) / 2.
+                
+                image = torch.clamp(refined_rgb, 0, 1)
+            else:
+                raise NotImplementedError
+        else:
+            pre_refine_img = None
+            refined_rgb = None
             
 
         # Loss
@@ -210,6 +235,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 train_log_path = Path(dataset.model_path) / 'train_log'
                 train_log_path.mkdir(exist_ok=True, parents=True)
                 torchvision.utils.save_image(image, os.path.join(str(train_log_path), '{0:05d}'.format(iteration) + ".png"))
+                if refined_rgb is not None:
+                    torchvision.utils.save_image(pre_refine_img, os.path.join(str(train_log_path), '{0:05d}_prerefine'.format(iteration) + ".png"))
+                    torchvision.utils.save_image(refined_rgb, os.path.join(str(train_log_path), '{0:05d}_refine'.format(iteration) + ".png"))
+                # torchvision.utils.save_image(feature_im[:3], os.path.join(str(train_log_path), '{0:05d}_feature'.format(iteration) + ".png"))
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
@@ -313,7 +342,7 @@ if __name__ == "__main__":
                         default=[5000, 6000, 7_000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument('--log_im_every', type=int, default=1000)
+    parser.add_argument('--log_im_every', type=int, default=2000)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
