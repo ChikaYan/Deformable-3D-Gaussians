@@ -27,6 +27,13 @@ import numpy as np
 import pickle
 from argparse import Namespace
 
+try:
+    import wandb
+    WANDB_FOUND = True
+except ImportError:
+    WANDB_FOUND = False
+WANDB_FOUND = False
+
 
 def render_set(
         model_path, 
@@ -104,7 +111,9 @@ def render_set(
         imgs.append(rendering)
     
     if not args.no_vid:
-        torchvision.io.write_video(os.path.join(model_path, name, "ours_{}".format(iteration), "renders.mp4"), torch.vstack(imgs), fps=30)
+        imgs = torch.stack(imgs).permute([0,2,3,1]).cpu().numpy()
+        imgs = (imgs * 255).astype(np.uint8)
+        torchvision.io.write_video(os.path.join(model_path, name, "ours_{}".format(iteration), "renders.mp4"), imgs, fps=30)
 
 
 def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, deform_sh):
@@ -376,12 +385,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras()[:50], gaussians, pipeline,
-                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, no_vid=args.no_vid)
+                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, args=args)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, no_vid=args.no_vid)
+                        background, deform, dataset.deform_sh, refine_model=refine_model, model_args=dataset, args=args)
 
 
 if __name__ == "__main__":

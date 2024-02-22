@@ -22,6 +22,13 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
 import numpy as np
+from pathlib import Path
+
+try:
+    import wandb
+    WANDB_FOUND = True
+except ImportError:
+    WANDB_FOUND = False
 
 
 def readImages(renders_dir, gt_dir):
@@ -54,7 +61,7 @@ def evaluate(model_paths):
 
         test_dir = Path(scene_dir) / "test"
 
-        for method in os.listdir(test_dir):
+        for method in sorted(os.listdir(test_dir)):
             if not method.startswith("ours"):
                 continue
             print("Method:", method)
@@ -111,6 +118,24 @@ def evaluate(model_paths):
             json.dump(per_view_dict[scene_dir], fp, indent=True)
         # except:
         #     print("Unable to compute metrics for model", scene_dir)
+            
+        if WANDB_FOUND:
+            wandb_id_file = Path(scene_dir) / 'wandb_id.txt'
+            if wandb_id_file.exists():
+                with wandb_id_file.open('r') as f:
+                    wandb_id = f.read()
+                wandb.init(
+                    project='gs_head_refine',
+                    id=wandb_id,
+                    resume='must',
+                )
+
+                wandb.log({
+                    'test/psnr': torch.tensor(psnrs).mean().item(),
+                    'test/ssim': torch.tensor(ssims).mean().item(),
+                    'test/lpips': torch.tensor(lpipss).mean().item(),
+                })
+            
 
 
 if __name__ == "__main__":

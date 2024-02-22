@@ -13,3 +13,5 @@ data/
 script/
 
 slurm_out/
+
+wandb/

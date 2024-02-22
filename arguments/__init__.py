@@ -12,6 +12,7 @@
 from argparse import ArgumentParser, Namespace
 import sys
 import os
+from typing import Literal, Optional
 
 
 class GroupParams:
@@ -69,6 +70,10 @@ class ModelParams(ParamGroup):
         self.cnn_out_rescale = 0.001
         self.refine_parser_type = 'pix2pix' # pix2pix, stylegan2, mlp
         self.refine_mode = 'add' # add, replace
+        self.layer_model: Literal['none', 'bg', 'both'] = 'none'
+        self.layer_parser_type = 'mlp'
+        self.layer_out_rescale = 1
+        self.layer_feature_dim = 32
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -91,10 +96,19 @@ class OptimizationParams(ParamGroup):
         self.iterations = 40_000
         self.warm_up = 3_000
         self.warm_up_cnn_refinement = 20_000
+        self.warm_up_layer = 10_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
+        self.layer_bg_lr_init = 0.0025
+        self.layer_bg_lr_final = 0.0025
+        self.layer_bg_lr_delay_mult = 1
+        self.layer_bg_lr_max_steps = 30_000
+        self.layer_fg_lr_init = 0.0025
+        self.layer_fg_lr_final = 0.0025
+        self.layer_fg_lr_delay_mult = 1
+        self.layer_fg_lr_max_steps = 30_000
         self.refine_lr_init = 1e-2
         self.refine_lr_final = 1e-2
         self.refine_lr_delay_mult = 1
@@ -112,6 +126,8 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        self.wandb_mode = 'online'
+        self.log_every = 100
         super().__init__(parser, "Optimization Parameters")
 
 
