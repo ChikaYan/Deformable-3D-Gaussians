@@ -12,18 +12,18 @@ from .refine_nets.unet import RefineUnetDecoder
 
 
 class RefineModel:
-    def __init__(self, t_dim=1, feature_dim=256, t_multires=0, n_blocks=2, cnn_out_rescale=0.001, parser_type='pix2pix', im_res=(512,512)):
+    def __init__(self, t_dim=1, feature_dim=256, t_multires=0, n_blocks=2, out_rescale=0.001, parser_type='pix2pix', im_res=(512,512)):
         self.t_multires = t_multires
         self.embed_time_fn, time_input_ch = get_embedder(t_multires, t_dim)
         self.optimizer = None
 
         self.parser_type = parser_type
         if parser_type == 'pix2pix':
-            self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks, out_rescale=cnn_out_rescale).cuda()
+            self.network = Pix2PixDecoder(input_nc=feature_dim + time_input_ch, n_blocks=n_blocks, out_rescale=out_rescale).cuda()
         elif parser_type == 'mlp':
-            self.network = RefineMLPDecoder(input_ch=feature_dim + time_input_ch, out_rescale=cnn_out_rescale).cuda()
+            self.network = RefineMLPDecoder(input_ch=feature_dim + time_input_ch, out_rescale=out_rescale).cuda()
         elif parser_type == 'unet':
-            self.network = RefineUnetDecoder(in_channels=feature_dim + time_input_ch, out_rescale=cnn_out_rescale).cuda()
+            self.network = RefineUnetDecoder(in_channels=feature_dim + time_input_ch, out_rescale=out_rescale).cuda()
         elif parser_type == 'stylegan2':
             raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
             self.network = StyleGan2Gen(

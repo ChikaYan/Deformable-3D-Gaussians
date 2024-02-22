@@ -29,9 +29,10 @@ class DeformLayerNetwork(nn.Module):
                 input_ch=feature_dim + time_input_ch, 
                 out_rescale=layer_parser_rescale,
                 output_ch=out_channel,
-                D=32,
-                W=4,
+                D=4,
+                W=32,
                 skips=[],
+                act_fn=torch.sigmoid,
                 ).cuda()
         elif parser_type == 'unet':
             self.network = RefineUnetDecoder(in_channels=feature_dim + time_input_ch, out_rescale=layer_parser_rescale, out_channels=out_channel).cuda()
@@ -56,7 +57,7 @@ class DeformLayerNetwork(nn.Module):
         else:
             raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
         
-        self.feature_img = nn.Parameter(torch.rand([feature_dim, img_h, img_w]).requires_grad_(True)).cuda()
+        self.feature_img = nn.Parameter(torch.rand([feature_dim, img_h, img_w], device='cuda').requires_grad_(True))
 
 
     def forward(self, t):

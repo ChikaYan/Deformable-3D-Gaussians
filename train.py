@@ -26,6 +26,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import torchvision
 from pathlib import Path
 from scene.layer_model import LayerModel
+from utils.general_utils import get_num_trainable_params
 
 # try:
 #     from torch.utils.tensorboard import SummaryWriter
@@ -50,18 +51,23 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
     scene = Scene(model_args, gaussians)
 
     t_dim = scene.train_cameras[1.0][0].exp.shape[-1]
+
+    model_summary = "######### Num of Trainable Parameters #########\n"
     deform = DeformModel(t_dim=t_dim, is_blender=model_args.is_blender, is_6dof=model_args.is_6dof)
     deform.train_setting(opt)
+
+    model_summary += f"{'Deform'.ljust(20)}: {get_num_trainable_params(deform.deform)}\n"
 
     if model_args.use_ex_feature:
         refine_model = RefineModel(
             t_dim=t_dim,
             feature_dim=gaussians.EX_FEATURE_DIM, 
             t_multires=0, 
-            cnn_out_rescale=model_args.cnn_out_rescale,
+            out_rescale=model_args.refine_out_rescale,
             parser_type=model_args.refine_parser_type,
             )
         refine_model.train_setting(opt)
+        model_summary += f"{'Refine'.ljust(20)}: {get_num_trainable_params(refine_model.network)}\n"
     else:
         refine_model = None
 
@@ -76,10 +82,18 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             parser_type=model_args.layer_parser_type,
             )
         layer_model.train_setting(opt)
+        model_summary += f"{'Layer Background'.ljust(20)}: {get_num_trainable_params(layer_model.bg_model)}\n"
+        if layer_model.fg_model is not None:
+            model_summary += f"{'Layer Background'.ljust(20)}: {get_num_trainable_params(layer_model.bg_model)}\n"
     else:
         layer_model = None
 
     gaussians.training_setup(opt)
+
+
+    with (Path(model_args.model_path) / 'model_summary.txt').open('w') as f:
+        f.write(model_summary)
+
 
     # bg_color = [1, 1, 1] if model_args.white_background else [0, 0, 0]
     bg_color = [0,0,0]
@@ -189,6 +203,7 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             gs_img = None
             refined_rgb = None
 
+        # apply background
         fg = bg = None
         if layer_model is not None and iteration >= opt.warm_up_layer:
             if gs_img is None:
@@ -206,6 +221,10 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             # composite with given background image
             # only do so when layer model is not used
             image = image + (1.-alpha) * scene_background
+        else:
+            # use black or white bacground
+            if model_args.white_background:
+                image = image + (1.-alpha) * 1.
             
 
         # Loss
@@ -425,6 +444,7 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         gs_img = None
                         refined_rgb = None
 
+                    # apply background
                     fg = bg = None
                     if layer_model is not None and iteration >= opt_args.warm_up_layer:
                         if gs_img is None:
@@ -444,6 +464,10 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         scene_background = torch.from_numpy(scene.background).permute([2,0,1]) / 255.
                         scene_background = scene_background.to('cuda')
                         image = image + (1.-alpha) * scene_background
+                    else:
+                        # use black or white bacground
+                        if model_args.white_background:
+                            image = image + (1.-alpha) * 1.
                     
 
                     image = torch.clamp(image, 0, 1)

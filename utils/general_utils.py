@@ -16,6 +16,12 @@ import numpy as np
 import random
 
 
+def get_num_trainable_params(model):
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    n_params = sum([np.prod(p.size()) for p in model_parameters])
+    return n_params
+
+
 def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
 
