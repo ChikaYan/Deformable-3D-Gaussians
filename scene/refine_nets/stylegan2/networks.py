@@ -13,6 +13,9 @@ from .torch_utils.ops import conv2d_resample
 from .torch_utils.ops import upfirdn2d
 from .torch_utils.ops import bias_act
 from .torch_utils.ops import fma
+from typing import Literal
+from utils.time_utils import get_embedder
+from ..mlp import RefineMLPDecoder
 
 #----------------------------------------------------------------------------
 
@@ -278,8 +281,9 @@ class SynthesisLayer(torch.nn.Module):
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
 
-    def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1):
-        assert noise_mode in ['random', 'const', 'none']
+    def forward(self, x, w, noise_mode='random', noise=None, fused_modconv=True, gain=1):
+        assert noise_mode in ['random', 'const', 'none', 'time']
+        if noise == 'time': assert noise is not None
         in_resolution = self.resolution // self.up
         misc.assert_shape(x, [None, self.weight.shape[1], in_resolution, in_resolution])
         styles = self.affine(w)
@@ -352,7 +356,7 @@ class SynthesisBlock(torch.nn.Module):
             self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
 
         if in_channels != 0:
-            self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
+            self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=1,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
             self.num_conv += 1
 
@@ -383,7 +387,8 @@ class SynthesisBlock(torch.nn.Module):
             x = self.const.to(dtype=dtype, memory_format=memory_format)
             x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
         else:
-            misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
+            # misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
+            misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution])
             x = x.to(dtype=dtype, memory_format=memory_format)
 
         # Main layers.
@@ -400,8 +405,9 @@ class SynthesisBlock(torch.nn.Module):
 
         # ToRGB.
         if img is not None:
-            misc.assert_shape(img, [None, self.img_channels, self.resolution // 2, self.resolution // 2])
-            img = upfirdn2d.upsample2d(img, self.resample_filter)
+            # misc.assert_shape(img, [None, self.img_channels, self.resolution // 2, self.resolution // 2])
+            misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
+            # img = upfirdn2d.upsample2d(img, self.resample_filter)
         if self.is_last or self.architecture == 'skip':
             y = self.torgb(x, next(w_iter), fused_modconv=fused_modconv)
             y = y.to(dtype=torch.float32, memory_format=torch.contiguous_format)
@@ -421,6 +427,7 @@ class SynthesisNetwork(torch.nn.Module):
         channel_base    = 32768,    # Overall multiplier for the number of channels.
         channel_max     = 512,      # Maximum number of channels in any layer.
         num_fp16_res    = 0,        # Use FP16 for the N highest resolutions.
+        num_blocks      = 4,        # Control number of blocks in equal size StyleGan2 
         **block_kwargs,             # Arguments for SynthesisBlock.
     ):
         assert img_resolution >= 4 and img_resolution & (img_resolution - 1) == 0
@@ -429,13 +436,15 @@ class SynthesisNetwork(torch.nn.Module):
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
-        self.block_resolutions = [2 ** i for i in range(2, self.img_resolution_log2 + 1)]
+        # self.block_resolutions = [2 ** i for i in range(2, self.img_resolution_log2 + 1)]
+        self.block_resolutions = [512 for _ in range(num_blocks)]
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
         self.num_ws = 0
-        for res in self.block_resolutions:
-            in_channels = channels_dict[res // 2] if res > 4 else 0
+        for i, res in enumerate(self.block_resolutions):
+            # in_channels = channels_dict[res // 2] if res > 4 else 0
+            in_channels = 16 if i == 0 else channels_dict[res]
             out_channels = channels_dict[res]
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
@@ -444,22 +453,23 @@ class SynthesisNetwork(torch.nn.Module):
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb
-            setattr(self, f'b{res}', block)
+            setattr(self, f'b{i}_{res}', block)
 
-    def forward(self, ws, **block_kwargs):
+    def forward(self, feature_im, ws, **block_kwargs):
         block_ws = []
         with torch.autograd.profiler.record_function('split_ws'):
             misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
             ws = ws.to(torch.float32)
             w_idx = 0
-            for res in self.block_resolutions:
-                block = getattr(self, f'b{res}')
+            for i,res in enumerate(self.block_resolutions):
+                block = getattr(self, f'b{i}_{res}')
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
                 w_idx += block.num_conv
 
-        x = img = None
-        for res, cur_ws in zip(self.block_resolutions, block_ws):
-            block = getattr(self, f'b{res}')
+        x = feature_im
+        img = None
+        for i, (res, cur_ws) in enumerate(zip(self.block_resolutions, block_ws)):
+            block = getattr(self, f'b{i}_{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
         return img
 
@@ -483,11 +493,57 @@ class Generator(torch.nn.Module):
         self.img_channels = img_channels
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+    #     self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
-        ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-        img = self.synthesis(ws, **synthesis_kwargs)
+    # def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
+    #     ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
+    #     img = self.synthesis(ws, **synthesis_kwargs)
+    #     return img
+    
+    def forward(self, feature_im, w, **synthesis_kwargs):
+        ws = w.unsqueeze(1).repeat([1, self.num_ws, 1])
+        img = self.synthesis(feature_im, ws, **synthesis_kwargs)
         return img
 
 #----------------------------------------------------------------------------
+    
+
+class StyleGan2Gen(torch.nn.Module):
+    def __init__(self,
+        w_dim,                      # Intermediate latent (W) dimensionality.
+        img_resolution,             # Output resolution.
+        img_channels,               # Number of output color channels.
+        synthesis_kwargs    = {},   # Arguments for SynthesisNetwork.
+        t_embed_dim = 0,
+        coord_multires = 4,
+        noise_mode:Literal['random', 'const', 'none', 'time'] = 'random',
+    ):
+        '''
+            Wrapper around style gan2
+        '''
+        super().__init__()
+        self.G = Generator(
+            z_dim=0,
+            c_dim=0,
+            w_dim=w_dim,
+            img_resolution=img_resolution,
+            img_channels=img_channels,
+            synthesis_kwargs=synthesis_kwargs,
+        )
+        if noise_mode == 'time':
+            embed_coord_fn, coord_input_ch = get_embedder(coord_multires, 2)
+            uv = torch.stack(torch.meshgrid(torch.arange(64), torch.arange(64))).cuda().permute([1,2,0])
+            self.coord_embeds = embed_coord_fn(uv) # test if embedder works with this shape
+
+            self.noise_net = RefineMLPDecoder(input_ch=t_embed_dim + coord_input_ch, output_ch=1)
+
+    
+    def forward(self, feature_im, w, t_embed=None, noise_mode='random', **synthesis_kwargs):
+        noise = None
+        if noise_mode == 'time':
+            # use mlp to infer noise of shape [1, 1, res, res]
+            mlp_in = torch.stack([t_embed, self.coord_embeds])
+            noise = self.noise_net(mlp_in)
+
+        return self.G(feature_im, w, noise_mode=noise_mode, noise=noise, **synthesis_kwargs)
+

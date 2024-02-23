@@ -5,8 +5,8 @@ from utils.rigid_utils import exp_se3
 
 
 def get_embedder(multires, i=1):
-    if i == -1:
-        return nn.Identity(), 3
+    if multires == -1:
+        return nn.Identity(), i
 
     embed_kwargs = {
         'include_input': True,

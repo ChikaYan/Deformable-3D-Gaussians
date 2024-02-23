@@ -43,7 +43,7 @@ except ImportError:
     WANDB_FOUND = False
 
 
-def training(model_args, opt, pipe, testing_iterations, saving_iterations):
+def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams, testing_iterations, saving_iterations):
     prepare_output_and_logger(model_args, opt, pipe)
     tb_writer = None
     gaussians = GaussianModel(model_args.sh_degree, model_args.use_ex_feature)
@@ -56,18 +56,25 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
     deform = DeformModel(t_dim=t_dim, is_blender=model_args.is_blender, is_6dof=model_args.is_6dof)
     deform.train_setting(opt)
 
-    model_summary += f"{'Deform'.ljust(20)}: {get_num_trainable_params(deform.deform)}\n"
+    deform_n_param = get_num_trainable_params(deform.deform)
+    model_summary += f"{'Deform'.ljust(20)}: {deform_n_param}\n"
+    if WANDB_FOUND:
+        wandb.log({'num_param/deform': deform_n_param})
 
     if model_args.use_ex_feature:
         refine_model = RefineModel(
-            t_dim=t_dim,
+            exp_dim=t_dim,
             feature_dim=gaussians.EX_FEATURE_DIM, 
-            t_multires=0, 
+            exp_multires=0, 
             out_rescale=model_args.refine_out_rescale,
             parser_type=model_args.refine_parser_type,
+            stylegan_n_blocks=model_args.stylegan_n_blocks,
             )
         refine_model.train_setting(opt)
-        model_summary += f"{'Refine'.ljust(20)}: {get_num_trainable_params(refine_model.network)}\n"
+        refine_n_param = get_num_trainable_params(refine_model.network)
+        model_summary += f"{'Refine'.ljust(20)}: {refine_n_param}\n"
+        if WANDB_FOUND:
+            wandb.log({'num_param/deform': refine_n_param})
     else:
         refine_model = None
 
@@ -82,9 +89,16 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             parser_type=model_args.layer_parser_type,
             )
         layer_model.train_setting(opt)
-        model_summary += f"{'Layer Background'.ljust(20)}: {get_num_trainable_params(layer_model.bg_model)}\n"
+
+        bg_n_param = get_num_trainable_params(layer_model.bg_model)
+        model_summary += f"{'Layer Background'.ljust(20)}: {bg_n_param}\n"
+        if WANDB_FOUND:
+            wandb.log({'num_param/layer_bg': bg_n_param})
         if layer_model.fg_model is not None:
-            model_summary += f"{'Layer Background'.ljust(20)}: {get_num_trainable_params(layer_model.bg_model)}\n"
+            fg_n_param = get_num_trainable_params(layer_model.fg_model)
+            model_summary += f"{'Layer Background'.ljust(20)}: {fg_n_param}\n"
+            if WANDB_FOUND:
+                wandb.log({'num_param/layer_fg': fg_n_param})
     else:
         layer_model = None
 
@@ -161,11 +175,11 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
         else:
             N = gaussians.get_xyz.shape[0]
-            time_input = exp.unsqueeze(0).expand(N, -1)
+            exp_input = exp.unsqueeze(0).expand(N, -1)
 
             # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
             ast_noise = 0
-            d_xyz, d_rotation, d_scaling, d_sh = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
+            d_xyz, d_rotation, d_scaling, d_sh = deform.step(gaussians.get_xyz.detach(), exp_input + ast_noise)
             if not model_args.deform_sh:
                 d_sh = None
 
@@ -181,11 +195,12 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             # apply feature + CNN based appearance refinement
             feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
-            time_input = exp.unsqueeze(0)
+            exp_input = exp.unsqueeze(0)
+            time_input = viewpoint_cam.fid.unsqueeze(0)
             # time_input = torch.zeros_like(exp.unsqueeze(0))
             # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
 
-            refined_rgb = refine_model.step(feature_im, time_input)[0]
+            refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
             gs_img = image
 
             if model_args.refine_mode == 'add':
@@ -208,11 +223,11 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
         if layer_model is not None and iteration >= opt.warm_up_layer:
             if gs_img is None:
                 gs_img = image
-            time_input = exp.unsqueeze(0)
-            bg = layer_model.get_background(time_input)
+            exp_input = exp.unsqueeze(0)
+            bg = layer_model.get_background(exp_input)
             if layer_model.fg_model is not None:
                 # blend foreground & background
-                fg = layer_model.get_foreground(time_input) # [4, H, W]
+                fg = layer_model.get_foreground(exp_input) # [4, H, W]
                 image = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * image + (1.-fg[3:]) * (1.-alpha) * bg
             else:
                 image = image + (1.-alpha) * bg
@@ -225,7 +240,7 @@ def training(model_args, opt, pipe, testing_iterations, saving_iterations):
             # use black or white bacground
             if model_args.white_background:
                 image = image + (1.-alpha) * 1.
-            
+        image = torch.clamp(image, 0, 1)
 
         # Loss
         log_dict = {}
@@ -346,7 +361,6 @@ def prepare_output_and_logger(args, opt_args, pipe_args):
         cfg_log_f.write(str(Namespace(**vars(pipe_args))))
 
     if WANDB_FOUND:
-        pass
         args_dict = args.__dict__
         args_dict.update(opt_args.__dict__)
         args_dict.update(pipe_args.__dict__)
@@ -354,7 +368,7 @@ def prepare_output_and_logger(args, opt_args, pipe_args):
             config=args_dict,
             project='gs_head_refine',
             group=Path(args.source_path).name,
-            name=Path(args.model_path).name,
+            name=f'{Path(args.model_path).parent.name}/{Path(args.model_path).name}',
             mode=opt_args.wandb_mode,
             )
         
@@ -410,8 +424,8 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                     fid = viewpoint.fid
                     exp = viewpoint.exp
                     xyz = scene.gaussians.get_xyz
-                    time_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
+                    exp_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
+                    d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), exp_input)
                     if not model_args.deform_sh:
                         d_sh = None
 
@@ -428,8 +442,10 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         # apply feature + CNN based appearance refinement
                         feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
-                        time_input = exp.unsqueeze(0)
-                        refined_rgb = refine_model.step(feature_im, time_input)[0]
+                        exp_input = exp.unsqueeze(0)
+                        time_input = viewpoint.fid.unsqueeze(0)
+
+                        refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
                         gs_img = image
 
                         if model_args.refine_mode == 'add':
@@ -449,11 +465,11 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                     if layer_model is not None and iteration >= opt_args.warm_up_layer:
                         if gs_img is None:
                             gs_img = image
-                        time_input = exp.unsqueeze(0)
-                        bg = layer_model.get_background(time_input)
+                        exp_input = exp.unsqueeze(0)
+                        bg = layer_model.get_background(exp_input)
                         if layer_model.fg_model is not None:
                             # blend foreground & background
-                            fg = layer_model.get_foreground(time_input) # [4, H, W]
+                            fg = layer_model.get_foreground(exp_input) # [4, H, W]
                             image = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * image + (1.-fg[3:]) * (1.-alpha) * bg
                         else:
                             image = image + (1.-alpha) * bg
@@ -468,6 +484,8 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         # use black or white bacground
                         if model_args.white_background:
                             image = image + (1.-alpha) * 1.
+                    image = torch.clamp(image, 0, 1)
+
                     
 
                     image = torch.clamp(image, 0, 1)

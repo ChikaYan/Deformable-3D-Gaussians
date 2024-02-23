@@ -5,8 +5,6 @@ import torch.nn.functional as F
 
 class RefineMLPDecoder(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], out_rescale=1, act_fn=None):
-        """ 
-        """
         super(RefineMLPDecoder, self).__init__()
         self.D = D
         self.W = W

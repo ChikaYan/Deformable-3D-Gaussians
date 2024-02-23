@@ -74,6 +74,7 @@ class ModelParams(ParamGroup):
         self.layer_parser_type = 'mlp'
         self.layer_out_rescale = 1
         self.layer_feature_dim = 32
+        self.stylegan_n_blocks = 8
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

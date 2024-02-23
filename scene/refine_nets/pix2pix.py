@@ -1,11 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import os
-from utils.system_utils import searchForMaxIteration
-from utils.general_utils import get_expon_lr_func
-from utils.time_utils import get_embedder
-from utils.stylegan2.networks import Generator as StyleGan2Gen
 
 
 # from https://github.com/NVIDIA/pix2pixHD/blob/master/models/networks.py
