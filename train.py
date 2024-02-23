@@ -27,6 +27,8 @@ import torchvision
 from pathlib import Path
 from scene.layer_model import LayerModel
 from utils.general_utils import get_num_trainable_params
+from scene.cameras import Camera
+from typing import Optional
 
 # try:
 #     from torch.utils.tensorboard import SummaryWriter
@@ -42,10 +44,100 @@ try:
 except ImportError:
     WANDB_FOUND = False
 
+def infer(
+        model_args: ModelParams, 
+        opt: OptimizationParams, 
+        pipe: PipelineParams,
+        iteration: int,
+        viewpoint_cam: Camera,
+        gaussians: GaussianModel, 
+        scene: Scene, 
+        background: torch.Tensor,
+        deform: DeformModel, 
+        refine_model: Optional[RefineModel]=None,
+        layer_model: Optional[LayerModel]=None,
+        ):
+
+    if model_args.load2gpu_on_the_fly:
+        viewpoint_cam.load2device()
+    fid = viewpoint_cam.fid
+    exp = viewpoint_cam.exp
+
+    d_sh = None
+    if iteration < opt.warm_up:
+        d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+    else:
+        N = gaussians.get_xyz.shape[0]
+        exp_input = exp.unsqueeze(0).expand(N, -1)
+
+        # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
+        ast_noise = 0
+        d_xyz, d_rotation, d_scaling, d_sh = deform.step(gaussians.get_xyz.detach(), exp_input + ast_noise)
+        if not model_args.deform_sh:
+            d_sh = None
+
+    # Render
+    render_ex_feature = model_args.use_ex_feature and iteration >= opt.warm_up_cnn_refinement
+    render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, model_args.is_6dof, d_sh, render_ex_feature=render_ex_feature)
+    image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
+        "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
+    alpha = render_pkg_re["alpha"]
+
+
+    if model_args.use_ex_feature and iteration >= opt.warm_up_cnn_refinement:
+        # apply feature + CNN based appearance refinement
+        feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
+
+        exp_input = exp.unsqueeze(0)
+        time_input = viewpoint_cam.fid.unsqueeze(0)
+        # time_input = torch.zeros_like(exp.unsqueeze(0))
+        # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
+
+        refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
+        gs_img = image
+
+        if model_args.refine_mode == 'add':
+            image = torch.clamp(image + refined_rgb, 0, 1)
+        elif model_args.refine_mode == 'replace':
+            # assert opt.warm_up_cnn_refinement == 0
+            
+            if model_args.refine_parser_type == 'pix2pix':
+                refined_rgb = (refined_rgb + 1.) / 2.
+            
+            image = torch.clamp(refined_rgb, 0, 1)
+        else:
+            raise NotImplementedError
+    else:
+        gs_img = None
+        refined_rgb = None
+
+    # apply background
+    fg = bg = None
+    if layer_model is not None and iteration >= opt.warm_up_layer:
+        if gs_img is None:
+            gs_img = image
+        exp_input = exp.unsqueeze(0)
+        bg = layer_model.get_background(exp_input)
+        if layer_model.fg_model is not None:
+            # blend foreground & background
+            fg = layer_model.get_foreground(exp_input) # [4, H, W]
+            image = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * image + (1.-fg[3:]) * (1.-alpha) * bg
+        else:
+            image = image + (1.-alpha) * bg
+            
+    elif scene.background is not None:
+        # composite with given background image
+        # only do so when layer model is not used
+        image = image + (1.-alpha) * scene_background
+    else:
+        # use black or white bacground
+        if model_args.white_background:
+            image = image + (1.-alpha) * 1.
+    image = torch.clamp(image, 0, 1)
+
 
 def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams, testing_iterations, saving_iterations):
     prepare_output_and_logger(model_args, opt, pipe)
-    tb_writer = None
     gaussians = GaussianModel(model_args.sh_degree, model_args.use_ex_feature)
 
     scene = Scene(model_args, gaussians)
@@ -135,22 +227,6 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         f.write(f"\n")
 
     for iteration in range(1, opt.iterations + 1):
-        if network_gui.conn == None:
-            network_gui.try_connect()
-        while network_gui.conn != None:
-            try:
-                net_image_bytes = None
-                custom_cam, do_training, pipe.do_shs_python, pipe.do_cov_python, keep_alive, scaling_modifer = network_gui.receive()
-                if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer)["render"]
-                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2,
-                                                                                                               0).contiguous().cpu().numpy())
-                network_gui.send(net_image_bytes, model_args.source_path)
-                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                    break
-            except Exception as e:
-                network_gui.conn = None
-
         iter_start.record()
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
