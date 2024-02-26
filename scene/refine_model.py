@@ -18,7 +18,7 @@ class RefineModel:
             exp_dim=1,
             feature_dim=256,
             exp_multires=0,
-            time_multires=4,
+            time_multires=10, # encoding frequency for fid, only used by stylegan2 atm
             pix2pix_n_blocks=2,
             out_rescale=0.001,
             parser_type='pix2pix',

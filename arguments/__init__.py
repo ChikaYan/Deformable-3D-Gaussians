@@ -75,6 +75,8 @@ class ModelParams(ParamGroup):
         self.layer_out_rescale = 1
         self.layer_feature_dim = 32
         self.stylegan_n_blocks = 8
+        self.pix2pix_n_blocks = 2
+        self.stylegan_noise: Literal['random', 'const', 'none', 'time'] = 'random'
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

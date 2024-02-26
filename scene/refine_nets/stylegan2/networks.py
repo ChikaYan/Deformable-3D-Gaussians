@@ -281,9 +281,9 @@ class SynthesisLayer(torch.nn.Module):
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
 
-    def forward(self, x, w, noise_mode='random', noise=None, fused_modconv=True, gain=1):
+    def forward(self, x, w, noise_mode='random', time_noise=None, fused_modconv=True, gain=1):
         assert noise_mode in ['random', 'const', 'none', 'time']
-        if noise == 'time': assert noise is not None
+        if noise_mode == 'time': assert time_noise is not None
         in_resolution = self.resolution // self.up
         misc.assert_shape(x, [None, self.weight.shape[1], in_resolution, in_resolution])
         styles = self.affine(w)
@@ -291,8 +291,10 @@ class SynthesisLayer(torch.nn.Module):
         noise = None
         if self.use_noise and noise_mode == 'random':
             noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
-        if self.use_noise and noise_mode == 'const':
+        elif self.use_noise and noise_mode == 'const':
             noise = self.noise_const * self.noise_strength
+        elif self.use_noise and noise_mode == 'time':
+            noise = time_noise * self.noise_strength
 
         flip_weight = (self.up == 1) # slightly faster
         x = modulated_conv2d(x=x, weight=self.weight, styles=styles, noise=noise, up=self.up,
@@ -532,7 +534,7 @@ class StyleGan2Gen(torch.nn.Module):
         )
         if noise_mode == 'time':
             embed_coord_fn, coord_input_ch = get_embedder(coord_multires, 2)
-            uv = torch.stack(torch.meshgrid(torch.arange(64), torch.arange(64))).cuda().permute([1,2,0])
+            uv = torch.stack(torch.meshgrid(torch.arange(img_resolution), torch.arange(img_resolution))).cuda().permute([1,2,0])
             self.coord_embeds = embed_coord_fn(uv) # test if embedder works with this shape
 
             self.noise_net = RefineMLPDecoder(input_ch=t_embed_dim + coord_input_ch, output_ch=1)
@@ -542,8 +544,8 @@ class StyleGan2Gen(torch.nn.Module):
         noise = None
         if noise_mode == 'time':
             # use mlp to infer noise of shape [1, 1, res, res]
-            mlp_in = torch.stack([t_embed, self.coord_embeds])
-            noise = self.noise_net(mlp_in)
+            mlp_in = torch.concat([t_embed.unsqueeze(0).repeat([*self.coord_embeds.shape[:2], 1]), self.coord_embeds], axis=-1)
+            noise = self.noise_net(mlp_in.unsqueeze(0).permute([0,3,1,2]))
 
-        return self.G(feature_im, w, noise_mode=noise_mode, noise=noise, **synthesis_kwargs)
+        return self.G(feature_im, w, noise_mode=noise_mode, time_noise=noise, **synthesis_kwargs)
 

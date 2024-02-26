@@ -414,7 +414,9 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
                 exp_multires=0, 
                 out_rescale=model_args.refine_out_rescale,
                 parser_type=model_args.refine_parser_type,
+                pix2pix_n_blocks=model_args.pix2pix_n_blocks,
                 stylegan_n_blocks=model_args.stylegan_n_blocks,
+                stylegan_noise='none',
                 )
             refine_model.load_weights(model_args.model_path)
         else:

@@ -68,7 +68,9 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
             exp_multires=0, 
             out_rescale=model_args.refine_out_rescale,
             parser_type=model_args.refine_parser_type,
+            pix2pix_n_blocks=model_args.pix2pix_n_blocks,
             stylegan_n_blocks=model_args.stylegan_n_blocks,
+            stylegan_noise=model_args.stylegan_noise,
             )
         refine_model.train_setting(opt)
         refine_n_param = get_num_trainable_params(refine_model.network)
