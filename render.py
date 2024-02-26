@@ -107,8 +107,9 @@ def render_set(
 
             refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
 
-            torchvision.utils.save_image(rendering, os.path.join(pre_refine_path, '{0:05d}'.format(idx) + ".png"))
-            torchvision.utils.save_image(refined_rgb, os.path.join(refine_path, '{0:05d}'.format(idx) + ".png"))
+            if not args.no_extra:
+                torchvision.utils.save_image(rendering, os.path.join(pre_refine_path, '{0:05d}'.format(idx) + ".png"))
+                torchvision.utils.save_image(refined_rgb, os.path.join(refine_path, '{0:05d}'.format(idx) + ".png"))
 
             if model_args.refine_mode == 'add':
                 rendering = torch.clamp(rendering + refined_rgb, 0, 1)
@@ -148,11 +149,12 @@ def render_set(
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        # torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
-        if fg is not None:
-            torchvision.utils.save_image(fg, os.path.join(fg_path, '{0:05d}'.format(idx) + ".png"))
-        if bg is not None:
-            torchvision.utils.save_image(bg, os.path.join(bg_path, '{0:05d}'.format(idx) + ".png"))
+        if not args.no_extra:
+            # torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+            if fg is not None:
+                torchvision.utils.save_image(fg, os.path.join(fg_path, '{0:05d}'.format(idx) + ".png"))
+            if bg is not None:
+                torchvision.utils.save_image(bg, os.path.join(bg_path, '{0:05d}'.format(idx) + ".png"))
 
         imgs.append(rendering)
     
@@ -470,6 +472,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no_vid", action="store_true")
+    parser.add_argument("--no_extra", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)

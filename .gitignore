@@ -15,3 +15,7 @@ script/
 slurm_out/
 
 wandb/
+
+sweep/
+
+submodules/

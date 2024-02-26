@@ -119,6 +119,11 @@ def evaluate(model_paths):
         # except:
         #     print("Unable to compute metrics for model", scene_dir)
             
+
+        mean_psnr = torch.tensor(psnrs).mean().item()
+        mean_ssim = torch.tensor(ssims).mean().item()
+        mean_lpips = torch.tensor(lpipss).mean().item()
+            
         if WANDB_FOUND:
             wandb_id_file = Path(scene_dir) / 'wandb_id.txt'
             if wandb_id_file.exists():
@@ -131,9 +136,9 @@ def evaluate(model_paths):
                 )
 
                 wandb.log({
-                    'test/psnr': torch.tensor(psnrs).mean().item(),
-                    'test/ssim': torch.tensor(ssims).mean().item(),
-                    'test/lpips': torch.tensor(lpipss).mean().item(),
+                    'test/psnr': mean_psnr,
+                    'test/ssim': mean_ssim,
+                    'test/lpips': mean_lpips,
                 })
             
 
