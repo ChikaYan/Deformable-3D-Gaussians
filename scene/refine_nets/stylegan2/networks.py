@@ -534,7 +534,7 @@ class StyleGan2Gen(torch.nn.Module):
         )
         if noise_mode == 'time':
             embed_coord_fn, coord_input_ch = get_embedder(coord_multires, 2)
-            uv = torch.stack(torch.meshgrid(torch.arange(img_resolution), torch.arange(img_resolution))).cuda().permute([1,2,0])
+            uv = torch.stack(torch.meshgrid(torch.arange(img_resolution), torch.arange(img_resolution))).cuda().permute([1,2,0]) / img_resolution
             self.coord_embeds = embed_coord_fn(uv) # test if embedder works with this shape
 
             self.noise_net = RefineMLPDecoder(input_ch=t_embed_dim + coord_input_ch, output_ch=1)

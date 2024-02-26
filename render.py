@@ -416,9 +416,10 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
                 parser_type=model_args.refine_parser_type,
                 pix2pix_n_blocks=model_args.pix2pix_n_blocks,
                 stylegan_n_blocks=model_args.stylegan_n_blocks,
-                stylegan_noise='none',
+                stylegan_noise=model_args.stylegan_noise,
                 )
             refine_model.load_weights(model_args.model_path)
+            refine_model.stylegan_noise = 'none' # disable noise after weight loading to avoid error
         else:
             refine_model = None
 
