@@ -80,11 +80,11 @@ def render_set(
     imgs = []
     bgs = []
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+    for idx, view_cam in enumerate(tqdm(views, desc="Rendering progress")):
         if load2gpu_on_the_fly:
-            view.load2device()
-        fid = view.fid
-        exp = view.exp
+            view_cam.load2device()
+        fid = view_cam.fid
+        exp = view_cam.exp
         # if idx == 0:
         #     exp = view.exp
         # else:
@@ -94,7 +94,7 @@ def render_set(
         d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), time_input)
         if not deform_sh:
             d_sh = None
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh, render_ex_feature=model_args.use_ex_feature)
+        results = render(view_cam, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, d_sh, render_ex_feature=model_args.use_ex_feature)
         rendering = results["render"]
         depth = results["depth"]
         alpha = results["alpha"]
@@ -103,7 +103,7 @@ def render_set(
         if refine_model is not None:
             feature_im = results["feature_im"] # [h, w, EX_FEATURE_DIM]
             exp_input = exp.unsqueeze(0)
-            time_input = view.fid.unsqueeze(0)
+            time_input = view_cam.fid.unsqueeze(0)
 
             refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
 
@@ -124,14 +124,18 @@ def render_set(
         # apply background
         fg = bg = None
         if layer_model is not None:
+            time_input = fid.unsqueeze(0)
             exp_input = exp.unsqueeze(0)
-            bg = layer_model.get_background(exp_input)
+            cam_pose_input = torch.from_numpy(np.concatenate([view_cam.T, view_cam.look_at[:,0]])).type_as(exp_input).unsqueeze(0)
+
+            bg = layer_model.get_background(time_input, exp_input, cam_pose_input)
             if layer_model.fg_model is not None:
                 # blend foreground & background
-                fg = layer_model.get_foreground(exp_input) # [4, H, W]
+                fg = layer_model.get_background(time_input, exp_input, cam_pose_input) # [4, H, W]
                 rendering = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * rendering + (1.-fg[3:]) * (1.-alpha) * bg
             else:
                 rendering = rendering + (1.-alpha) * bg
+                # rendering = bg
             bgs.append(bg)
                 
         elif scene.background is not None:
@@ -146,7 +150,7 @@ def render_set(
                 rendering = rendering + (1.-alpha) * 1.
         rendering = torch.clamp(rendering, 0, 1)
 
-        gt = view.original_image[0:3, :, :]
+        gt = view_cam.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         if not args.no_extra:
@@ -427,11 +431,13 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
             layer_model = LayerModel(
                 model_args.layer_model,
                 img_size=(scene.train_cameras[1.0][0].image_height, scene.train_cameras[1.0][0].image_width),
-                t_dim=exp_dim,
+                exp_dim=exp_dim,
                 feature_dim=model_args.layer_feature_dim, 
-                t_multires=0, 
                 layer_parser_rescale=model_args.layer_out_rescale,
                 parser_type=model_args.layer_parser_type,
+                exp_multires=model_args.layer_input_exp_multires,
+                t_multires=model_args.layer_input_t_multires,
+                pose_multires=model_args.layer_input_pose_multires,
                 )
             layer_model.load_weights(model_args.model_path)
         else:

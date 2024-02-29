@@ -70,13 +70,16 @@ class ModelParams(ParamGroup):
         self.refine_out_rescale = 0.01
         self.refine_parser_type = 'pix2pix' # pix2pix, stylegan2, mlp
         self.refine_mode = 'add' # add, replace
+        self.stylegan_n_blocks = 8
+        self.pix2pix_n_blocks = 2
+        self.stylegan_noise: Literal['random', 'const', 'none', 'time'] = 'random'
         self.layer_model: Literal['none', 'bg', 'both'] = 'none'
         self.layer_parser_type = 'mlp'
         self.layer_out_rescale = 1
         self.layer_feature_dim = 32
-        self.stylegan_n_blocks = 8
-        self.pix2pix_n_blocks = 2
-        self.stylegan_noise: Literal['random', 'const', 'none', 'time'] = 'random'
+        self.layer_input_exp_multires = -2 # set to -2 to disable layer input
+        self.layer_input_t_multires = -2
+        self.layer_input_pose_multires = 4 # input camera pose to layer model
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -104,8 +107,8 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.layer_bg_lr_init = 1e-3
-        self.layer_bg_lr_final = 1e-3
+        self.layer_bg_lr_init = 1e-4
+        self.layer_bg_lr_final = 1e-4
         self.layer_bg_lr_delay_mult = 1
         self.layer_bg_lr_max_steps = 30_000
         self.layer_fg_lr_init = 0.0025

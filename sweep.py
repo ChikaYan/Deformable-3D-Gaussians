@@ -17,7 +17,7 @@ import shutil
 from pathlib import Path
 
 PROJECT = 'gs_head_refine'
-SWEEP_ID = 'swf8slcv'
+SWEEP_ID = 'pozanwbq'
 
 def sys_cmd(cmd):
     print(cmd)
@@ -61,7 +61,8 @@ def train_agent(config=None):
         # print("\nTraining complete.")
 
         # invoke rendering
-        cmd = f"python render.py -m {args.model_path} --no_vid --no_extra"
+        # cmd = f"python render.py -m {args.model_path} --no_vid --no_extra"
+        cmd = f"python render.py -m {args.model_path} --no_extra"
         sys_cmd(cmd)
 
         # invoke metrics
@@ -74,4 +75,4 @@ def train_agent(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(f'{PROJECT}/{SWEEP_ID}', train_agent, count=50) 
+    wandb.agent(f'{PROJECT}/{SWEEP_ID}', train_agent, count=18) 

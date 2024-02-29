@@ -28,6 +28,9 @@ class Camera(nn.Module):
         self.FoVy = FoVy
         self.image_name = image_name
 
+        # self.look_at = torch.from_numpy(R @ np.array([[0,0,-1]]).T)
+        self.look_at = R @ np.array([[0,0,-1]]).T
+
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:

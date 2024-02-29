@@ -29,6 +29,7 @@ from scene.layer_model import LayerModel
 from utils.general_utils import get_num_trainable_params
 from scene.cameras import Camera
 from typing import Optional
+import numpy as np
 
 # try:
 #     from torch.utils.tensorboard import SummaryWriter
@@ -84,11 +85,13 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         layer_model = LayerModel(
             model_args.layer_model,
             img_size=(scene.train_cameras[1.0][0].image_height, scene.train_cameras[1.0][0].image_width),
-            t_dim=t_dim,
+            exp_dim=t_dim,
             feature_dim=model_args.layer_feature_dim, 
-            t_multires=0, 
             layer_parser_rescale=model_args.layer_out_rescale,
             parser_type=model_args.layer_parser_type,
+            exp_multires=model_args.layer_input_exp_multires,
+            t_multires=model_args.layer_input_t_multires,
+            pose_multires=model_args.layer_input_pose_multires,
             )
         layer_model.train_setting(opt)
 
@@ -150,11 +153,11 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         total_frame = len(viewpoint_stack)
         time_interval = 1 / total_frame
 
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+        view_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
         if model_args.load2gpu_on_the_fly:
-            viewpoint_cam.load2device()
-        fid = viewpoint_cam.fid
-        exp = viewpoint_cam.exp
+            view_cam.load2device()
+        fid = view_cam.fid
+        exp = view_cam.exp
 
         d_sh = None
         if iteration < opt.warm_up:
@@ -171,7 +174,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
 
         # Render
         render_ex_feature = model_args.use_ex_feature and iteration >= opt.warm_up_cnn_refinement
-        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, model_args.is_6dof, d_sh, render_ex_feature=render_ex_feature)
+        render_pkg_re = render(view_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, model_args.is_6dof, d_sh, render_ex_feature=render_ex_feature)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
             "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
         alpha = render_pkg_re["alpha"]
@@ -182,7 +185,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
             feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
             exp_input = exp.unsqueeze(0)
-            time_input = viewpoint_cam.fid.unsqueeze(0)
+            time_input = view_cam.fid.unsqueeze(0)
             # time_input = torch.zeros_like(exp.unsqueeze(0))
             # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(1, -1) * time_interval * smooth_term(iteration)
 
@@ -209,14 +212,18 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         if layer_model is not None and iteration >= opt.warm_up_layer:
             if gs_img is None:
                 gs_img = image
+            time_input = fid.unsqueeze(0)
             exp_input = exp.unsqueeze(0)
-            bg = layer_model.get_background(exp_input)
+            cam_pose_input = torch.from_numpy(np.concatenate([view_cam.T, view_cam.look_at[:,0]])).type_as(exp_input).unsqueeze(0)
+
+            bg = layer_model.get_background(time_input, exp_input, cam_pose_input)
             if layer_model.fg_model is not None:
                 # blend foreground & background
-                fg = layer_model.get_foreground(exp_input) # [4, H, W]
+                fg = layer_model.get_background(time_input, exp_input, cam_pose_input) # [4, H, W]
                 image = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * image + (1.-fg[3:]) * (1.-alpha) * bg
             else:
                 image = image + (1.-alpha) * bg
+                # image = bg
                 
         elif scene.background is not None:
             # composite with given background image
@@ -230,7 +237,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
 
         # Loss
         log_dict = {}
-        gt_image = viewpoint_cam.original_image.cuda()
+        gt_image = view_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         log_dict['train/l1'] = Ll1.item()
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
@@ -240,7 +247,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         iter_end.record()
 
         if model_args.load2gpu_on_the_fly:
-            viewpoint_cam.load2device('cpu')
+            view_cam.load2device('cpu')
 
         with torch.no_grad():
             # Progress bar
@@ -404,11 +411,11 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
             if config['cameras'] and len(config['cameras']) > 0:
                 images = torch.tensor([], device="cuda")
                 gts = torch.tensor([], device="cuda")
-                for idx, viewpoint in enumerate(config['cameras']):
+                for idx, view_cam in enumerate(config['cameras']):
                     if model_args.load2gpu_on_the_fly:
-                        viewpoint.load2device()
-                    fid = viewpoint.fid
-                    exp = viewpoint.exp
+                        view_cam.load2device()
+                    fid = view_cam.fid
+                    exp = view_cam.exp
                     xyz = scene.gaussians.get_xyz
                     exp_input = exp.unsqueeze(0).expand(xyz.shape[0], -1)
                     d_xyz, d_rotation, d_scaling, d_sh = deform.step(xyz.detach(), exp_input)
@@ -416,7 +423,7 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         d_sh = None
 
                     render_ex_feature = model_args.use_ex_feature and iteration >= opt_args.warm_up_cnn_refinement
-                    render_pkg_re = renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, model_args.is_6dof, d_sh, render_ex_feature=render_ex_feature)
+                    render_pkg_re = renderFunc(view_cam, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, model_args.is_6dof, d_sh, render_ex_feature=render_ex_feature)
                     image = render_pkg_re['render']
                     alpha = render_pkg_re['alpha']
                     # image = torch.clamp(
@@ -429,7 +436,7 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                         feature_im = render_pkg_re["feature_im"] # [h, w, EX_FEATURE_DIM]
 
                         exp_input = exp.unsqueeze(0)
-                        time_input = viewpoint.fid.unsqueeze(0)
+                        time_input = view_cam.fid.unsqueeze(0)
 
                         refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
                         gs_img = image
@@ -451,14 +458,17 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                     if layer_model is not None and iteration >= opt_args.warm_up_layer:
                         if gs_img is None:
                             gs_img = image
+                        time_input = fid.unsqueeze(0)
                         exp_input = exp.unsqueeze(0)
-                        bg = layer_model.get_background(exp_input)
+                        cam_pose_input = torch.from_numpy(np.concatenate([view_cam.T, view_cam.look_at[:,0]])).type_as(exp_input).unsqueeze(0)
+                        bg = layer_model.get_background(time_input, exp_input, cam_pose_input)
                         if layer_model.fg_model is not None:
                             # blend foreground & background
-                            fg = layer_model.get_foreground(exp_input) # [4, H, W]
+                            fg = layer_model.get_background(time_input, exp_input, cam_pose_input) # [4, H, W]
                             image = fg[3:] * fg[:3] + (1.-fg[3:]) * alpha * image + (1.-fg[3:]) * (1.-alpha) * bg
                         else:
                             image = image + (1.-alpha) * bg
+                            # image = bg
                             
                     elif scene.background is not None:
                         # composite with given background image
@@ -475,26 +485,26 @@ def training_report(iteration, log_dict, testing_iterations, scene: Scene, rende
                     
 
                     image = torch.clamp(image, 0, 1)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    gt_image = torch.clamp(view_cam.original_image.to("cuda"), 0.0, 1.0)
                     images = torch.cat((images, image.unsqueeze(0)), dim=0)
                     gts = torch.cat((gts, gt_image.unsqueeze(0)), dim=0)
 
                     if model_args.load2gpu_on_the_fly:
-                        viewpoint.load2device('cpu')
+                        view_cam.load2device('cpu')
                     if idx < 5:
                         train_log_path = Path(model_args.model_path) / f"{config['name']}_log"
                         train_log_path.mkdir(exist_ok=True, parents=True)
-                        torchvision.utils.save_image(image, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}.png'))
+                        torchvision.utils.save_image(image, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}.png'))
                         if iteration == testing_iterations[0]:
-                            torchvision.utils.save_image(gt_image, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}_GT.png'))
+                            torchvision.utils.save_image(gt_image, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}_GT.png'))
 
                         if refined_rgb is not None:
-                            torchvision.utils.save_image(gs_img, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}_gs.png')) # result rendered by gaussian
-                            torchvision.utils.save_image(refined_rgb, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}_refine.png')) 
+                            torchvision.utils.save_image(gs_img, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}_gs.png')) # result rendered by gaussian
+                            torchvision.utils.save_image(refined_rgb, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}_refine.png')) 
                         if fg is not None:
-                            torchvision.utils.save_image(fg, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}_layer_fg.png')) 
+                            torchvision.utils.save_image(fg, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}_layer_fg.png')) 
                         if bg is not None:
-                            torchvision.utils.save_image(bg, str(train_log_path / f'{viewpoint.image_name}_{iteration:05d}_layer_bg.png')) 
+                            torchvision.utils.save_image(bg, str(train_log_path / f'{view_cam.image_name}_{iteration:05d}_layer_bg.png')) 
                         
 
                 l1_test = l1_loss(images, gts)
