@@ -29,6 +29,8 @@ from utils.camera_utils import camera_nerfies_from_JSON
 from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 import skimage
+import torch
+from scipy import ndimage
 
 
 
@@ -46,6 +48,7 @@ class CameraInfo(NamedTuple):
     fid: float
     exp: Optional[np.array] = None
     depth: Optional[np.array] = None
+    valid_mask: Optional[np.array] = None # contains mask [H, W] that represents valid alpha mask region of Gaussian
 
 
 class SceneInfo(NamedTuple):
@@ -55,6 +58,39 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
     background: Optional[np.array] = None
+
+def batch_rodrigues(rot_vecs, epsilon=1e-8, dtype=torch.float32):
+    ''' Calculates the rotation matrices for a batch of rotation vectors
+        Parameters
+        ----------
+        rot_vecs: torch.tensor Nx3
+            array of N axis-angle vectors
+        Returns
+        -------
+        R: torch.tensor Nx3x3
+            The rotation matrices for the given axis-angle parameters
+    '''
+
+    batch_size = rot_vecs.shape[0]
+    device = rot_vecs.device
+
+    angle = torch.norm(rot_vecs + 1e-8, dim=1, keepdim=True)
+    rot_dir = rot_vecs / angle
+
+    cos = torch.unsqueeze(torch.cos(angle), dim=1)
+    sin = torch.unsqueeze(torch.sin(angle), dim=1)
+
+    # Bx1 arrays
+    rx, ry, rz = torch.split(rot_dir, 1, dim=1)
+    K = torch.zeros((batch_size, 3, 3), dtype=dtype, device=device)
+
+    zeros = torch.zeros((batch_size, 1), dtype=dtype, device=device)
+    K = torch.cat([zeros, -rz, ry, rz, zeros, -rx, -ry, rx, zeros], dim=1) \
+        .view((batch_size, 3, 3))
+
+    ident = torch.eye(3, dtype=dtype, device=device).unsqueeze(dim=0)
+    rot_mat = ident + sin * K + (1 - cos) * torch.bmm(K, K)
+    return rot_mat
 
 
 def load_K_Rt_from_P(filename, P=None):
@@ -958,7 +994,7 @@ def readNerfaceDataset(path, eval, is_debug, novel_view, is_test):
     return scene_info
 
 
-def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
+def readIMAvatarCameras_(path, is_eval, is_debug, novel_view, is_test=False):
     
     if is_eval or is_test:
         sub_dir = ['MVI_1812']
@@ -1055,6 +1091,119 @@ def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
                 break
 
     # shape_params = np.array(camera_dict['shape_params']).astype(np.float32).unsqueeze(0)
+            
+def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
+    
+    if is_eval or is_test:
+        sub_dir = ['test']
+        # sub_dir = ['MVI_1812']
+        subsample = 200
+    else:
+        sub_dir = ['train']
+        # sub_dir = ['MVI_1810', 'MVI_1814']
+        subsample = 1
+
+    img_res = [512,512]
+    h, w = img_res
+    cam_infos = []
+
+    image_id = 0
+    INTRI_REVERT_FLAG = False
+    for dir in sub_dir:
+        instance_dir = os.path.join(path, dir)
+        assert os.path.exists(instance_dir), "Data directory is empty"
+
+        cam_file = '{0}/{1}'.format(instance_dir, 'flame_params.json')
+
+        with open(cam_file, 'r') as f:
+            camera_dict = json.load(f)
+        
+        focal_cxcy = camera_dict['intrinsics']
+        # construct intrinsic matrix in pixels
+        intrinsics = np.zeros((4, 4))
+
+        # # from whatever camera convention to pytorch3d
+        # intrinsics[0, 0] = focal_cxcy[0] * 2
+        # intrinsics[1, 1] = focal_cxcy[1] * 2
+        # intrinsics[0, 2] = (focal_cxcy[2] * 2 - 1.0) * -1
+        # intrinsics[1, 2] = (focal_cxcy[3] * 2 - 1.0) * -1
+
+        if focal_cxcy[3] > 1:
+            # An old format of my datasets...
+            intrinsics[0, 0] = focal_cxcy[0] * img_res[0] / 512
+            intrinsics[1, 1] = focal_cxcy[1] * img_res[1] / 512
+            intrinsics[0, 2] = focal_cxcy[2] * img_res[0] / 512
+            intrinsics[1, 2] = focal_cxcy[3] * img_res[1] / 512
+        else:
+            intrinsics[0, 0] = focal_cxcy[0] * img_res[0]
+            intrinsics[1, 1] = focal_cxcy[1] * img_res[1]
+            intrinsics[0, 2] = focal_cxcy[2] * img_res[0]
+            intrinsics[1, 2] = focal_cxcy[3] * img_res[1]
+
+        if intrinsics[0, 0] < 0:
+            intrinsics[:, 0] *= -1
+            INTRI_REVERT_FLAG = True
+
+        fx, fy, cx, cy = intrinsics[0,0], intrinsics[1,1], intrinsics[0,2], intrinsics[1,2]
+        fovx = focal2fov(fx, pixels=w)
+        fovy = focal2fov(fy, h)
+
+        for idx in range(0, len(camera_dict['frames']), subsample):
+            frame = camera_dict['frames'][idx]
+            # world to camera matrix
+            world_mat = np.array(frame['world_mat']).astype(np.float32)
+            # camera to world matrix
+            if INTRI_REVERT_FLAG:
+                world_mat[0, :] *= -1
+            world_mat[:3, 2] *= -1
+            world_mat[2, 3] *= -1
+            # # world_mat is now in Pytorch3D format
+            # c2w = np.linalg.inv(np.concatenate([world_mat, np.array([[0,0,0,1]])],axis=0))
+            # # convert from Pytorch3D (X left Y up Z forward) to OpenCV/Colmap (X right Y down Z forward)
+            # c2w[:3, 0:2] *= -1
+
+            # # get the world-to-camera transform and set R, T
+            # w2c = np.linalg.inv(c2w)
+            # R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+
+            T = world_mat[:3, 3]
+
+            expression = np.array(frame['expression']).astype(np.float32)
+            flame_pose = np.array(frame['pose']).astype(np.float32)
+            
+            # convert flame global & head rotation to c2w
+            rot_mats = batch_rodrigues(torch.from_numpy(flame_pose[:6]).view([-1, 3])).numpy()
+            c2w_rot = rot_mats[0] @ rot_mats[1]
+            w2c_rot = np.linalg.inv(c2w_rot)
+            R = np.transpose(w2c_rot) 
+
+
+            image_path = '{0}/{1}.png'.format(instance_dir, frame["file_path"])
+            mask_path = image_path.replace('image', 'mask')
+            # if use_semantics:
+            #     semantic_paths = image_path.replace('image', 'semantic')
+            img_name = int(frame["file_path"].split('/')[-1])
+            # bbox = ((np.array(frame['bbox']) + 1.) * np.array([img_res[0],img_res[1],img_res[0],img_res[1]])/ 2).astype(int)
+
+            mask = imageio.imread(mask_path, as_gray=True)
+            mask = skimage.img_as_float32(mask)
+            mask = mask > 127.5
+
+            image = np.array(Image.open(image_path))
+            image[~mask] = 255
+            image = Image.fromarray(image)
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovX=fovx, FovY=fovy, image=image, image_path=image_path,
+                                image_name=img_name, width=image.size[0], height=image.size[1], exp=np.concatenate([expression, flame_pose]), 
+                                fid=image_id
+                                ))
+            if not is_eval and not is_test:
+                image_id += 1
+
+            if is_debug and image_id > 50:
+                break
+
+    # shape_params = np.array(camera_dict['shape_params']).astype(np.float32).unsqueeze(0)
 
 
     return cam_infos
@@ -1072,19 +1221,148 @@ def readIMAvatarDataset(path, eval, is_debug, novel_view, is_test):
     nerf_normalization = getNerfppNorm(train_cam_infos)
     ply_path = os.path.join(path, "points3d.ply")
     '''Init point cloud'''
-    # if not os.path.exists(ply_path):
-    # Since mono dataset has no colmap, we start with random points
-    num_pts = 10_000
-    print(f"Generating random point cloud ({num_pts})...")
-    # xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
-    xyz = np.random.random((num_pts, 3)) * 3
-    shs = np.random.random((num_pts, 3)) / 255.0
-    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
-    storePly(ply_path, xyz, SH2RGB(shs) * 255)
-    # try:
-    #     pcd = fetchPly(ply_path)
-    # except:
-    #     pcd = None
+    if not os.path.exists(ply_path):
+        # Since mono dataset has no colmap, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    # load background
+    # background = np.array(Image.open(os.path.join(path, 'bg', '00001.png')))
+
+    scene_info = SceneInfo(point_cloud=pcd, 
+                           train_cameras=train_cam_infos, 
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization, 
+                           ply_path=ply_path,
+                           background=None,
+                           )
+
+    return scene_info
+
+def readInstaCameras(path, is_eval, is_debug, novel_view, is_test=False):
+    with open(os.path.join(path, "transforms.json"), 'r') as f:
+        meta_json = json.load(f)
+    
+    with open(os.path.join(path, "split.json"), 'r') as f:
+        split_json = json.load(f)
+
+    if is_test:
+        frame_names = split_json['test']
+    elif is_eval:
+        frame_names = split_json['test'][:50]
+    else:
+        frame_names = split_json['train']
+        
+    if is_debug:
+        frame_names = frame_names[:50]
+
+    
+    frames = meta_json['frames']
+    frames = sorted(frames, key=lambda x: int(Path(x['file_path']).stem))
+    total_frames = len(frame_names)
+
+
+
+    cam_infos = []
+    h, w = meta_json['h'], meta_json['w']
+    fx, fy, cx, cy = meta_json['fl_x'], meta_json['fl_y'], meta_json['cx'], meta_json['cy']
+    fovx = focal2fov(fx, w)
+    fovy = focal2fov(fy, h)
+
+    for idx, frame in enumerate(tqdm(frames, desc="Loading data into memory in advance")):
+        if Path(frame['file_path']).name not in frame_names:
+            continue
+
+        image_path = os.path.join(path, frame['file_path'].replace('images', 'matted'))
+        image_id = int(Path(image_path).stem)
+        image = np.array(Image.open(image_path))
+        alpha_mask = image[..., 3:] / 255.
+        image = image[..., :3]
+           
+        white_background = np.ones_like(image)* 255
+        image = Image.fromarray(np.uint8(image * alpha_mask + white_background * (1 - alpha_mask)))
+
+        # read parsing mask
+        parsing_mask =  np.array(Image.open(image_path.replace('matted', 'seg_mask')))[..., :1] 
+        parsing_mask = (parsing_mask == 90)
+        parsing_mask = (parsing_mask > 0).astype(np.int32)
+        parsing_mask = ndimage.median_filter(parsing_mask, size=5)
+        parsing_mask = (ndimage.binary_dilation(parsing_mask, iterations=3) > 0).astype(np.uint8)
+
+        head_mask = ndimage.median_filter(alpha_mask, size=5)
+        head_mask = np.where(parsing_mask, np.zeros_like(head_mask), head_mask)
+        head_mask[head_mask > 0.5] = 1.
+
+
+
+        exp_path = os.path.join(path, frame['exp_path'])
+        expression = np.array(np.loadtxt(exp_path)) # TODO: INSTA uses [16:] of this expression. Not sure why
+        eyes = np.array(np.loadtxt(exp_path.replace('exp', 'eyes')))
+        jaw = np.array(np.loadtxt(exp_path.replace('exp', 'jaw')))
+
+        expression = np.concatenate([expression,eyes,jaw])
+
+        if novel_view:
+            # vec=np.array([0,0,0.3493212163448334])
+            # rot_cycle=100
+            # tmp_pose=np.identity(4,dtype=np.float32)
+            # r1 = Rotation.from_euler('y', 15+(-30)*((idx % rot_cycle)/rot_cycle), degrees=True)
+            # tmp_pose[:3,:3]=r1.as_matrix()
+            # trans=tmp_pose[:3,:3]@vec
+            # tmp_pose[0:3,3]=trans
+            # c2w = tmp_pose
+            pass
+        else:
+            c2w = np.array(frame['transform_matrix'])
+        # c2w[:3, 1:3] *= -1
+        # pose from INSTA pipeline seems to have already converted to INST-NGP (OpenCV/COLMAP) format
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  
+        T = w2c[:3, 3]
+
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovX=fovx, FovY=fovy, image=image, image_path=image_path,
+                                    image_name=image_id, width=image.size[0], height=image.size[1], exp=expression, 
+                                    fid=image_id, valid_mask=head_mask[...,0]
+                                    ))
+    '''finish load all data'''
+    return cam_infos
+
+
+    return cam_infos
+
+def readInstaDataset(path, eval, is_debug, novel_view, is_test):
+    print("Load Insta Train Dataset")
+    train_cam_infos = readInstaCameras(path=path, is_eval=False, is_debug=is_debug, novel_view=novel_view, is_test=False)
+    print("Load Insta Test Dataset")
+    test_cam_infos = readInstaCameras(path=path, is_eval=eval, is_debug=is_debug, novel_view=novel_view, is_test=is_test)
+
+    if not eval: 
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+    
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    ply_path = os.path.join(path, "points3d.ply")
+    '''Init point cloud'''
+    if not os.path.exists(ply_path):
+        # Since mono dataset has no colmap, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
 
     # load background
     # background = np.array(Image.open(os.path.join(path, 'bg', '00001.png')))
@@ -1111,4 +1389,5 @@ sceneLoadTypeCallbacks = {
     "nersemble": readNerSembleDataset,  
     "nerface": readNerfaceDataset,  
     "imavatar": readIMAvatarDataset,  
+    "insta": readInstaDataset,  
 }

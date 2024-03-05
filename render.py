@@ -69,8 +69,8 @@ def render_set(
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
+    makedirs(pre_refine_path, exist_ok=True)
     if refine_model is not None:
-        makedirs(pre_refine_path, exist_ok=True)
         makedirs(refine_path, exist_ok=True)
     if layer_model is not None:
         makedirs(bg_path, exist_ok=True)
@@ -86,7 +86,8 @@ def render_set(
         fid = view_cam.fid
         exp = view_cam.exp
         # if idx == 0:
-        #     exp = view.exp
+        #     fid = view_cam.fid
+        #     exp = view_cam.exp
         # else:
         #     pass
         xyz = gaussians.get_xyz
@@ -100,15 +101,17 @@ def render_set(
         alpha = results["alpha"]
         depth = depth / (depth.max() + 1e-5)
 
+        if not args.no_extra:
+            torchvision.utils.save_image(rendering, os.path.join(pre_refine_path, '{0:05d}'.format(idx) + ".png"))
+
         if refine_model is not None:
             feature_im = results["feature_im"] # [h, w, EX_FEATURE_DIM]
             exp_input = exp.unsqueeze(0)
-            time_input = view_cam.fid.unsqueeze(0)
+            time_input = fid.unsqueeze(0)
 
             refined_rgb = refine_model.step(feature_im, exp_input, time=time_input)[0]
 
             if not args.no_extra:
-                torchvision.utils.save_image(rendering, os.path.join(pre_refine_path, '{0:05d}'.format(idx) + ".png"))
                 torchvision.utils.save_image(refined_rgb, os.path.join(refine_path, '{0:05d}'.format(idx) + ".png"))
 
             if model_args.refine_mode == 'add':
@@ -438,6 +441,7 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
                 exp_multires=model_args.layer_input_exp_multires,
                 t_multires=model_args.layer_input_t_multires,
                 pose_multires=model_args.layer_input_pose_multires,
+                layer_encoding=model_args.layer_encoding,
                 )
             layer_model.load_weights(model_args.model_path)
         else:
@@ -462,7 +466,7 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
 
         if not skip_train:
             render_func(model_args.model_path, model_args.load2gpu_on_the_fly, model_args.is_6dof, "train", scene.loaded_iter,
-                        scene.getTrainCameras()[:50], gaussians, scene, pipeline,
+                        scene.getTrainCameras(), gaussians, scene, pipeline,
                         background, deform, model_args.deform_sh, refine_model=refine_model, layer_model=layer_model, model_args=model_args, args=args)
 
         if not skip_test:

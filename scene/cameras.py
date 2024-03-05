@@ -17,7 +17,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask, image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, exp=None, depth=None):
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, exp=None, depth=None, valid_mask=None):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -27,6 +27,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.valid_mask = valid_mask
 
         # self.look_at = torch.from_numpy(R @ np.array([[0,0,-1]]).T)
         self.look_at = R @ np.array([[0,0,-1]]).T

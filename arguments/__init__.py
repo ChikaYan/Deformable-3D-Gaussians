@@ -74,6 +74,7 @@ class ModelParams(ParamGroup):
         self.pix2pix_n_blocks = 2
         self.stylegan_noise: Literal['random', 'const', 'none', 'time'] = 'random'
         self.layer_model: Literal['none', 'bg', 'both'] = 'none'
+        self.layer_encoding: Literal['fourier', 'hash'] = 'fourier'
         self.layer_parser_type = 'mlp'
         self.layer_out_rescale = 1
         self.layer_feature_dim = 32
@@ -107,8 +108,10 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.layer_bg_lr_init = 1e-4
-        self.layer_bg_lr_final = 1e-4
+        # self.layer_bg_lr_init = 2e-5
+        # self.layer_bg_lr_final = 2e-5
+        self.layer_bg_lr_init = 1e-3
+        self.layer_bg_lr_final = 1e-3
         self.layer_bg_lr_delay_mult = 1
         self.layer_bg_lr_max_steps = 30_000
         self.layer_fg_lr_init = 0.0025
@@ -132,6 +135,7 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        self.lambda_alpha_loss = 0. # L2 loss to encourage gaussians to stay within valid mask
         self.wandb_mode = 'online'
         self.log_every = 100
         super().__init__(parser, "Optimization Parameters")

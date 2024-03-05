@@ -19,6 +19,8 @@ WARNED = False
 
 
 def loadCam(args, id, cam_info, resolution_scale):
+    assert resolution_scale == 1.0, "Currently only support original scale training"
+
     orig_w, orig_h = cam_info.image.size
 
     if args.resolution in [1, 2, 4, 8]:
@@ -55,7 +57,7 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image_name=cam_info.image_name, uid=id,
                   data_device=args.data_device if not args.load2gpu_on_the_fly else 'cpu', 
                   fid=cam_info.fid, exp=cam_info.exp,
-                  depth=cam_info.depth)
+                  depth=cam_info.depth, valid_mask=cam_info.valid_mask)
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

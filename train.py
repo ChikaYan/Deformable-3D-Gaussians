@@ -12,10 +12,11 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, kl_divergence
+from utils.loss_utils import l1_loss, ssim, kl_divergence, l2_loss
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, DeformModel
+from scene.cameras import Camera
 from scene.refine_model import RefineModel
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
@@ -92,6 +93,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
             exp_multires=model_args.layer_input_exp_multires,
             t_multires=model_args.layer_input_t_multires,
             pose_multires=model_args.layer_input_pose_multires,
+            layer_encoding=model_args.layer_encoding,
             )
         layer_model.train_setting(opt)
 
@@ -153,7 +155,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         total_frame = len(viewpoint_stack)
         time_interval = 1 / total_frame
 
-        view_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+        view_cam: Camera = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
         if model_args.load2gpu_on_the_fly:
             view_cam.load2device()
         fid = view_cam.fid
@@ -209,7 +211,8 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
 
         # apply background
         fg = bg = None
-        if layer_model is not None and iteration >= opt.warm_up_layer:
+        apply_layer = layer_model is not None and iteration >= opt.warm_up_layer
+        if apply_layer:
             if gs_img is None:
                 gs_img = image
             time_input = fid.unsqueeze(0)
@@ -240,7 +243,20 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
         gt_image = view_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         log_dict['train/l1'] = Ll1.item()
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+        if opt.lambda_alpha_loss > 0 and apply_layer:
+            assert view_cam.valid_mask is not None
+            # the idea of alpha loss and valid mask is not to force Gaussian to have exactly alpha mask
+            # but to prevent Gaussian to grow to unncessary place
+            # we hence only penalize larger alpha
+            valid_mask = torch.from_numpy(view_cam.valid_mask).type_as(alpha)
+            alpha_loss = torch.where(alpha[0] > valid_mask, (alpha[0] - valid_mask)**2, 0).mean()
+            log_dict['train/alpha_loss'] = alpha_loss.item()
+        else:
+            alpha_loss = 0
+
+
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + opt.lambda_alpha_loss * alpha_loss
         log_dict['train/total_loss'] = loss.item()
         loss.backward()
 
@@ -541,7 +557,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[500, 1000, 5000, 7000] + list(range(10000, 40001, 2000)))
+                        default=[500, 1000, 2000, 5000, 7000] + list(range(10000, 40001, 2000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--log_im_every', type=int, default=99999999)

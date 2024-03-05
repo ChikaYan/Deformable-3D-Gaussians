@@ -47,27 +47,30 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "ori_imgs")):
             print("Found ori_imgs folder, assuming nerfbs dataset!")
             scene_info = sceneLoadTypeCallbacks["nerfblendshape"](args.source_path, args.eval, args.is_debug, args.novel_view, args.only_head, args.is_test)
+        elif os.path.exists(os.path.join(args.source_path, "split.json")) and os.path.exists(os.path.join(args.source_path, "flame")):
+            print("Assuming INSTA dataset!")
+            scene_info = sceneLoadTypeCallbacks["insta"](args.source_path, args.eval, args.is_debug, args.novel_view, args.is_test)
+        elif os.path.exists(os.path.join(args.source_path, "MVI_1810")) or 'soubhik' in args.source_path:
+            print("Found MVI_1810, assuming IMAvatar dataset!")
+            scene_info = sceneLoadTypeCallbacks["imavatar"](args.source_path, args.eval, args.is_debug, args.novel_view, args.is_test)
         elif os.path.exists(os.path.join(args.source_path, "index_map.npy")):
             print("Found index_map.npy, assuming nerface dataset!")
             scene_info = sceneLoadTypeCallbacks["nerface"](args.source_path, args.eval, args.is_debug, args.novel_view, args.is_test)
-        elif os.path.exists(os.path.join(args.source_path, "MVI_1810")):
-            print("Found MVI_1810, assuming nerface dataset!")
-            scene_info = sceneLoadTypeCallbacks["imavatar"](args.source_path, args.eval, args.is_debug, args.novel_view, args.is_test)
-        elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
-            print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
-        elif os.path.exists(os.path.join(args.source_path, "cameras_sphere.npz")):
-            print("Found cameras_sphere.npz file, assuming DTU data set!")
-            scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras_sphere.npz", "cameras_sphere.npz")
-        elif os.path.exists(os.path.join(args.source_path, "dataset.json")):
-            print("Found dataset.json file, assuming Nerfies data set!")
-            scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, args.eval)
-        elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")):
-            print("Found calibration_full.json, assuming Neu3D data set!")
-            scene_info = sceneLoadTypeCallbacks["plenopticVideo"](args.source_path, args.eval, 24)
-        elif os.path.exists(os.path.join(args.source_path, "transforms.json")):
-            print("Found calibration_full.json, assuming Dynamic-360 data set!")
-            scene_info = sceneLoadTypeCallbacks["dynamic360"](args.source_path)
+        # elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+        #     print("Found transforms_train.json file, assuming Blender data set!")
+        #     scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+        # elif os.path.exists(os.path.join(args.source_path, "cameras_sphere.npz")):
+        #     print("Found cameras_sphere.npz file, assuming DTU data set!")
+        #     scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras_sphere.npz", "cameras_sphere.npz")
+        # elif os.path.exists(os.path.join(args.source_path, "dataset.json")):
+        #     print("Found dataset.json file, assuming Nerfies data set!")
+        #     scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, args.eval)
+        # elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")):
+        #     print("Found calibration_full.json, assuming Neu3D data set!")
+        #     scene_info = sceneLoadTypeCallbacks["plenopticVideo"](args.source_path, args.eval, 24)
+        # elif os.path.exists(os.path.join(args.source_path, "transforms.json")):
+        #     print("Found calibration_full.json, assuming Dynamic-360 data set!")
+        #     scene_info = sceneLoadTypeCallbacks["dynamic360"](args.source_path)
         else:
             assert False, "Could not recognize scene type!"
 

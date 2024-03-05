@@ -8,7 +8,7 @@ from utils.general_utils import get_expon_lr_func
 from .refine_nets.pix2pix import Pix2PixDecoder
 from .refine_nets.mlp import RefineMLPDecoder
 from .refine_nets.unet import RefineUnetDecoder
-
+from .hash_encoding import MultiResHashGrid
 
 
 class DeformLayerNetwork(nn.Module):
@@ -25,6 +25,7 @@ class DeformLayerNetwork(nn.Module):
             exp_multires=-2,
             t_multires=10, 
             pose_multires=4,
+            layer_encoding='fourier',
             ):
         super(DeformLayerNetwork, self).__init__()
         self.img_h = img_h
@@ -35,15 +36,19 @@ class DeformLayerNetwork(nn.Module):
         self.embed_pose_fn, pose_input_ch = get_embedder(pose_multires, 6)
         self.apply_deform = apply_deform
         assert not apply_deform, "not supported yet"
+        self.layer_encoding = layer_encoding
 
-        # self.feature_img = nn.Parameter(torch.rand([feature_dim, img_h, img_w], device='cuda').requires_grad_(True))
-
-        embed_coord_fn, coord_input_ch = get_embedder(feature_dim, 2) # abuse feature_dim for PE frequency
-        img_resolution = 512
-        uv = torch.stack(torch.meshgrid(torch.arange(img_resolution), torch.arange(img_resolution))).cuda().permute([1,2,0]) / 512.
-        self.feature_img = embed_coord_fn(uv).permute([2,0,1])
-        feature_dim = coord_input_ch
-        self.feature_dim = coord_input_ch
+        self.uv = torch.stack(torch.meshgrid(torch.arange(img_h), torch.arange(img_w))).cuda().permute([1,2,0]) / max(img_h, img_w)
+        if layer_encoding == 'fourier':
+            embed_coord_fn, coord_input_ch = get_embedder(feature_dim, 2) # abuse feature_dim for PE frequency
+            self.feature_img = embed_coord_fn(self.uv).permute([2,0,1])
+            feature_dim = coord_input_ch
+            self.feature_dim = coord_input_ch
+        elif layer_encoding == 'hash':
+            self.hash_grid = MultiResHashGrid(2, n_features_per_level=feature_dim // 16).cuda()
+            # self.feature_img = nn.Parameter(torch.rand([feature_dim, img_h, img_w], device='cuda').requires_grad_(True))
+        else:
+            raise NotImplementedError(layer_encoding)
 
         input_channel = feature_dim + time_input_ch + exp_input_ch + pose_input_ch
 
@@ -56,9 +61,11 @@ class DeformLayerNetwork(nn.Module):
                 # input_ch=feature_dim, 
                 out_rescale=layer_parser_rescale,
                 output_ch=out_channel,
-                D=8,
-                W=128,
-                skips=[4],
+                # D=8,
+                # W=128,
+                D=4,
+                W=32,
+                skips=[],
                 act_fn=torch.sigmoid,
                 ).cuda()
         elif parser_type == 'unet':
@@ -84,11 +91,18 @@ class DeformLayerNetwork(nn.Module):
         else:
             raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
         
+    def get_feature_img(self):
+        # return self.feature_img
+        if self.layer_encoding == 'fourier':
+            return self.feature_img
+        elif self.layer_encoding == 'hash':
+            return self.hash_grid(self.uv).permute([2,0,1])
+
 
     def forward(self, t, exp, pose):
         # fetch embeddings
         transform = lambda x: x.T.unsqueeze(1).repeat([1, self.img_h, self.img_w])
-        net_in = [self.feature_img]
+        net_in = [self.get_feature_img()]
         net_in.append(transform(self.embed_exp_fn(exp)))
         net_in.append(transform(self.embed_time_fn(t)))
         net_in.append(transform(self.embed_pose_fn(pose)))
@@ -96,7 +110,6 @@ class DeformLayerNetwork(nn.Module):
 
         net_in = torch.concat(net_in, axis=0)
         
-        # x = self.feature_img
         return self.network(net_in.unsqueeze(0)).squeeze(0)
 
 
@@ -113,6 +126,7 @@ class LayerModel:
             exp_multires=-2,
             t_multires=10, 
             pose_multires=4,
+            layer_encoding='fourier',
             ):
         self.layer_model = layer_model
         # self.bg = nn.Parameter(torch.rand([3, *img_size]).requires_grad_(True)).cuda()
@@ -128,6 +142,7 @@ class LayerModel:
             parser_type=parser_type, 
             layer_parser_rescale=layer_parser_rescale, 
             out_channel=3,
+            layer_encoding=layer_encoding,
             )
 
         if layer_model == 'both':
@@ -143,6 +158,7 @@ class LayerModel:
                 parser_type=parser_type, 
                 layer_parser_rescale=layer_parser_rescale, 
                 out_channel=4,
+                layer_encoding=layer_encoding,
                 )
         else:
             self.fg_model = None
