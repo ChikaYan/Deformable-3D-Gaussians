@@ -1280,18 +1280,29 @@ def readInstaCameras(path, is_eval, is_debug, novel_view, is_test=False):
     for idx, frame in enumerate(tqdm(frames, desc="Loading data into memory in advance")):
         if Path(frame['file_path']).name not in frame_names:
             continue
+        
+        USE_MATTED_GT = False
 
-        image_path = os.path.join(path, frame['file_path'].replace('images', 'matted'))
-        image_id = int(Path(image_path).stem)
-        image = np.array(Image.open(image_path))
-        alpha_mask = image[..., 3:] / 255.
-        image = image[..., :3]
-           
-        white_background = np.ones_like(image)* 255
-        image = Image.fromarray(np.uint8(image * alpha_mask + white_background * (1 - alpha_mask)))
+        if USE_MATTED_GT:
+            image_path = os.path.join(path, frame['file_path'].replace('images', 'matted'))
+            image_id = int(Path(image_path).stem)
+            image = np.array(Image.open(image_path))
+
+            alpha_mask = image[..., 3:] / 255.
+            image = image[..., :3]   
+            white_background = np.ones_like(image)* 255
+            image = Image.fromarray(np.uint8(image * alpha_mask + white_background * (1 - alpha_mask)))
+        else:
+            image_path = os.path.join(path, frame['file_path'].replace('images', 'background'))
+            image_id = int(Path(image_path).stem)
+            image = Image.open(image_path)
+
+            # we still need alpha mask for valid mask and alpha loss
+            alpha_mask = np.array(Image.open(image_path.replace('background', 'matted')))[..., 3:] / 255.
+
 
         # read parsing mask
-        parsing_mask =  np.array(Image.open(image_path.replace('matted', 'seg_mask')))[..., :1] 
+        parsing_mask =  np.array(Image.open(os.path.join(path, frame['file_path'].replace('images', 'seg_mask'))))[..., :1] 
         parsing_mask = (parsing_mask == 90)
         parsing_mask = (parsing_mask > 0).astype(np.int32)
         parsing_mask = ndimage.median_filter(parsing_mask, size=5)

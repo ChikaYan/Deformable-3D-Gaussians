@@ -110,8 +110,8 @@ class OptimizationParams(ParamGroup):
         self.position_lr_max_steps = 30_000
         # self.layer_bg_lr_init = 2e-5
         # self.layer_bg_lr_final = 2e-5
-        self.layer_bg_lr_init = 1e-3
-        self.layer_bg_lr_final = 1e-3
+        self.layer_bg_lr_init = 1e-4
+        self.layer_bg_lr_final = 1e-4
         self.layer_bg_lr_delay_mult = 1
         self.layer_bg_lr_max_steps = 30_000
         self.layer_fg_lr_init = 0.0025

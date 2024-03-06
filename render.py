@@ -466,7 +466,7 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
 
         if not skip_train:
             render_func(model_args.model_path, model_args.load2gpu_on_the_fly, model_args.is_6dof, "train", scene.loaded_iter,
-                        scene.getTrainCameras(), gaussians, scene, pipeline,
+                        scene.getTrainCameras()[::50], gaussians, scene, pipeline,
                         background, deform, model_args.deform_sh, refine_model=refine_model, layer_model=layer_model, model_args=model_args, args=args)
 
         if not skip_test:
