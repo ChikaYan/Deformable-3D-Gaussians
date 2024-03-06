@@ -23,6 +23,7 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser
 import numpy as np
 from pathlib import Path
+import torchvision
 
 try:
     import wandb
@@ -80,10 +81,18 @@ def evaluate(model_paths):
             psnrs = []
             lpipss = []
 
+
             for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                 ssims.append(ssim(renders[idx], gts[idx]))
                 psnrs.append(psnr(renders[idx], gts[idx]))
                 lpipss.append(lpips_fn(renders[idx], gts[idx]).detach())
+
+            if args.log_error_map:
+                error_map_path = Path(renders_dir).parent / 'error'
+                error_map_path.mkdir(exist_ok=True, parents=True)
+                for idx in tqdm(range(len(renders)), desc="Error map saving progress"):
+                    error_map = torch.clamp(torch.abs(renders[idx] - gts[idx]) / 0.3, 0., 1.)[0]
+                    torchvision.utils.save_image(error_map, str(error_map_path / image_names[idx]))
 
             print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
             print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
@@ -151,5 +160,6 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    parser.add_argument('--log_error_map', action='store_true')
     args = parser.parse_args()
     evaluate(args.model_paths)
