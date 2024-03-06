@@ -94,6 +94,7 @@ def training(model_args:ModelParams, opt:OptimizationParams, pipe:PipelineParams
             t_multires=model_args.layer_input_t_multires,
             pose_multires=model_args.layer_input_pose_multires,
             layer_encoding=model_args.layer_encoding,
+            apply_deform=model_args.layer_apply_2d_deform,
             )
         layer_model.train_setting(opt)
 

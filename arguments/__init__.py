@@ -75,6 +75,7 @@ class ModelParams(ParamGroup):
         self.stylegan_noise: Literal['random', 'const', 'none', 'time'] = 'random'
         self.layer_model: Literal['none', 'bg', 'both'] = 'none'
         self.layer_encoding: Literal['fourier', 'hash'] = 'fourier'
+        self.layer_apply_2d_deform = False
         self.layer_parser_type = 'mlp'
         self.layer_out_rescale = 1
         self.layer_feature_dim = 32

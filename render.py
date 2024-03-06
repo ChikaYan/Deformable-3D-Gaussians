@@ -442,6 +442,7 @@ def render_sets(model_args: ModelParams, iteration: int, pipeline: PipelineParam
                 t_multires=model_args.layer_input_t_multires,
                 pose_multires=model_args.layer_input_pose_multires,
                 layer_encoding=model_args.layer_encoding,
+                apply_deform=model_args.layer_apply_2d_deform,
                 )
             layer_model.load_weights(model_args.model_path)
         else:

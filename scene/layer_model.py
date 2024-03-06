@@ -11,6 +11,8 @@ from .refine_nets.unet import RefineUnetDecoder
 from .hash_encoding import MultiResHashGrid
 
 
+
+
 class DeformLayerNetwork(nn.Module):
     def __init__(
             self, 
@@ -35,20 +37,28 @@ class DeformLayerNetwork(nn.Module):
         self.embed_exp_fn, exp_input_ch = get_embedder(exp_multires, exp_dim)
         self.embed_pose_fn, pose_input_ch = get_embedder(pose_multires, 6)
         self.apply_deform = apply_deform
-        assert not apply_deform, "not supported yet"
         self.layer_encoding = layer_encoding
 
         self.uv = torch.stack(torch.meshgrid(torch.arange(img_h), torch.arange(img_w))).cuda().permute([1,2,0]) / max(img_h, img_w)
+        self.uv = (self.uv - 0.5) * 0.9 + 0.5 # leave some space in the edge
+        self.uv_embed_fn, uv_embed_ch = get_embedder(feature_dim, 2) # abuse feature_dim for PE frequency
         if layer_encoding == 'fourier':
-            embed_coord_fn, coord_input_ch = get_embedder(feature_dim, 2) # abuse feature_dim for PE frequency
-            self.feature_img = embed_coord_fn(self.uv).permute([2,0,1])
-            feature_dim = coord_input_ch
-            self.feature_dim = coord_input_ch
+            feature_dim = uv_embed_ch
+            self.feature_dim = uv_embed_ch
         elif layer_encoding == 'hash':
             self.hash_grid = MultiResHashGrid(2, n_features_per_level=feature_dim // 16).cuda()
             # self.feature_img = nn.Parameter(torch.rand([feature_dim, img_h, img_w], device='cuda').requires_grad_(True))
         else:
             raise NotImplementedError(layer_encoding)
+
+        if apply_deform:
+            self.deform_net_2d = RefineMLPDecoder(
+                D=8,
+                W=128,
+                input_ch=uv_embed_ch + time_input_ch + exp_input_ch + pose_input_ch,
+                output_ch=2,
+                skips=[4],
+            ).cuda()
 
         input_channel = feature_dim + time_input_ch + exp_input_ch + pose_input_ch
 
@@ -92,23 +102,40 @@ class DeformLayerNetwork(nn.Module):
             raise NotImplementedError(f'refine_parser_type {parser_type} not supported')
         
     def get_feature_img(self):
-        # return self.feature_img
+        uv = self.uv
+        if self.apply_deform:
+            delta_uv = self.deform_net_2d(uv.permute([2,0,1]).unsqueeze(0))
+            delta_uv = delta_uv.squeeze(0).permute([1,2,0])
+            uv = delta_uv + uv
+
         if self.layer_encoding == 'fourier':
-            return self.feature_img
+            return self.uv_embed_fn(uv).permute([2,0,1])
         elif self.layer_encoding == 'hash':
-            return self.hash_grid(self.uv).permute([2,0,1])
+            return self.hash_grid(uv).permute([2,0,1])
 
 
     def forward(self, t, exp, pose):
         # fetch embeddings
         transform = lambda x: x.T.unsqueeze(1).repeat([1, self.img_h, self.img_w])
-        net_in = [self.get_feature_img()]
+        net_in = []
         net_in.append(transform(self.embed_exp_fn(exp)))
         net_in.append(transform(self.embed_time_fn(t)))
         net_in.append(transform(self.embed_pose_fn(pose)))
 
+        uv = self.uv
+        if self.apply_deform:
+            deform_in = torch.concat([self.uv_embed_fn(uv).permute([2,0,1]), *net_in], axis=0)
+            delta_uv = self.deform_net_2d(deform_in.unsqueeze(0))
+            delta_uv = delta_uv.squeeze(0).permute([1,2,0])
+            uv = torch.clamp(delta_uv + uv, 0, 1)
 
-        net_in = torch.concat(net_in, axis=0)
+        if self.layer_encoding == 'fourier':
+            feature_img = self.uv_embed_fn(uv)
+        elif self.layer_encoding == 'hash':
+            feature_img = self.hash_grid(uv)
+
+
+        net_in = torch.concat([feature_img.permute([2,0,1]), *net_in], axis=0)
         
         return self.network(net_in.unsqueeze(0)).squeeze(0)
 
