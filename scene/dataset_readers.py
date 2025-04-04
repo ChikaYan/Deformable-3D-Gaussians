@@ -1098,6 +1098,8 @@ def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
         sub_dir = ['test']
         # sub_dir = ['MVI_1812']
         subsample = 200
+        if is_test:
+            subsample = 1
     else:
         sub_dir = ['train']
         # sub_dir = ['MVI_1810', 'MVI_1814']
@@ -1167,6 +1169,7 @@ def readIMAvatarCameras(path, is_eval, is_debug, novel_view, is_test=False):
             # R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
 
             T = world_mat[:3, 3]
+            T[:2] *= -1.
 
             expression = np.array(frame['expression']).astype(np.float32)
             flame_pose = np.array(frame['pose']).astype(np.float32)
@@ -1282,6 +1285,7 @@ def readInstaCameras(path, is_eval, is_debug, novel_view, is_test=False):
             continue
         
         USE_MATTED_GT = False
+        # USE_MATTED_GT = True
 
         if USE_MATTED_GT:
             image_path = os.path.join(path, frame['file_path'].replace('images', 'matted'))

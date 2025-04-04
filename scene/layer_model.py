@@ -73,9 +73,9 @@ class DeformLayerNetwork(nn.Module):
                 output_ch=out_channel,
                 # D=8,
                 # W=128,
-                D=4,
-                W=32,
-                skips=[],
+                D=8,
+                W=128,
+                skips=[4],
                 act_fn=torch.sigmoid,
                 ).cuda()
         elif parser_type == 'unet':
